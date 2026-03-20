@@ -4,6 +4,7 @@ import { ActivityMonitor } from './activityMonitor';
 import { WebhookSender } from './webhookSender';
 import { GitListener } from './gitListener';
 import { CameraMonitor } from './cameraMonitor';
+import { JiraPicker } from './jiraPicker';
 
 export const logger = vscode.window.createOutputChannel("Developer Intelligence");
 
@@ -25,7 +26,16 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const cameraMonitor = new CameraMonitor(context.globalState);
 
-    const gitListener = new GitListener(aggregator, activityMonitor, webhookSender, cameraMonitor);
+    const jiraPicker = new JiraPicker();
+    setTimeout(() => {
+        jiraPicker.fetchAndPrompt();
+    }, 1000); // Small delay to let git warm up
+
+    const selectJiraCommand = vscode.commands.registerCommand('devhouse.selectJiraIssue', () => {
+        jiraPicker.showPicker();
+    });
+
+    const gitListener = new GitListener(aggregator, activityMonitor, webhookSender, cameraMonitor, jiraPicker);
     await gitListener.initialize();
 
     // Register a manual test command
@@ -38,6 +48,8 @@ export async function activate(context: vscode.ExtensionContext) {
         activityMonitor,
         gitListener,
         cameraMonitor,
+        jiraPicker,
+        selectJiraCommand,
         testCommand
     );
 }

@@ -6,6 +6,7 @@ import { SignalAggregator } from './signalAggregator';
 import { ActivityMonitor } from './activityMonitor';
 import { WebhookSender } from './webhookSender';
 import { CameraMonitor } from './cameraMonitor';
+import { JiraPicker } from './jiraPicker';
 import { SupaBaseEvent, ExtensionConfig } from './types';
 import { logger } from './extension';
 
@@ -14,6 +15,7 @@ export class GitListener {
     private activityMonitor: ActivityMonitor;
     private webhookSender: WebhookSender;
     private cameraMonitor: CameraMonitor;
+    private jiraPicker: JiraPicker;
     private disposables: vscode.Disposable[] = [];
     private lastCommitIds: Map<string, string> = new Map();
     private config!: ExtensionConfig;
@@ -22,12 +24,14 @@ export class GitListener {
         aggregator: SignalAggregator, 
         activityMonitor: ActivityMonitor,
         webhookSender: WebhookSender,
-        cameraMonitor: CameraMonitor
+        cameraMonitor: CameraMonitor,
+        jiraPicker: JiraPicker
     ) {
         this.aggregator = aggregator;
         this.activityMonitor = activityMonitor;
         this.webhookSender = webhookSender;
         this.cameraMonitor = cameraMonitor;
+        this.jiraPicker = jiraPicker;
         this.updateConfig();
 
         vscode.workspace.onDidChangeConfiguration((e) => {
@@ -330,6 +334,7 @@ export class GitListener {
             commit_size: calcAdditions + calcDeletions,
             is_merge_commit: stats.isMergeCommit,
             linked_issue: linkedIssue,
+            issue_id: this.jiraPicker.getActiveIssueId(),
             pull_request_number: null, // Hard to detect locally
             pr_title: null,
             pr_labels: [],

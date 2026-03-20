@@ -9,6 +9,7 @@ const activityMonitor_1 = require("./activityMonitor");
 const webhookSender_1 = require("./webhookSender");
 const gitListener_1 = require("./gitListener");
 const cameraMonitor_1 = require("./cameraMonitor");
+const jiraPicker_1 = require("./jiraPicker");
 exports.logger = vscode.window.createOutputChannel("Developer Intelligence");
 async function activate(context) {
     exports.logger.show(true);
@@ -22,14 +23,21 @@ async function activate(context) {
     const activityMonitor = new activityMonitor_1.ActivityMonitor(aggregator);
     activityMonitor.start();
     const cameraMonitor = new cameraMonitor_1.CameraMonitor(context.globalState);
-    const gitListener = new gitListener_1.GitListener(aggregator, activityMonitor, webhookSender, cameraMonitor);
+    const jiraPicker = new jiraPicker_1.JiraPicker();
+    setTimeout(() => {
+        jiraPicker.fetchAndPrompt();
+    }, 1000); // Small delay to let git warm up
+    const selectJiraCommand = vscode.commands.registerCommand('devhouse.selectJiraIssue', () => {
+        jiraPicker.showPicker();
+    });
+    const gitListener = new gitListener_1.GitListener(aggregator, activityMonitor, webhookSender, cameraMonitor, jiraPicker);
     await gitListener.initialize();
     // Register a manual test command
     const testCommand = vscode.commands.registerCommand('devintel.sendTestPing', async () => {
         const session = aggregator.getSession();
         vscode.window.showInformationMessage(`DevIntel: Current Session Duration: ${session.editing_duration_minutes}m. Lines added: ${session.lines_added}`);
     });
-    context.subscriptions.push(activityMonitor, gitListener, cameraMonitor, testCommand);
+    context.subscriptions.push(activityMonitor, gitListener, cameraMonitor, jiraPicker, selectJiraCommand, testCommand);
 }
 function deactivate() {
     // Clean up

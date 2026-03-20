@@ -53,6 +53,7 @@ export interface SupaBaseEvent {
     commit_size: number;
     is_merge_commit: boolean;
     linked_issue: string | null;
+    issue_id?: string | null;
     pull_request_number: number | null;
     pr_title: string | null;
     pr_labels: string[];
