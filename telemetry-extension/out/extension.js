@@ -8,6 +8,7 @@ const signalAggregator_1 = require("./signalAggregator");
 const activityMonitor_1 = require("./activityMonitor");
 const webhookSender_1 = require("./webhookSender");
 const gitListener_1 = require("./gitListener");
+const cameraMonitor_1 = require("./cameraMonitor");
 exports.logger = vscode.window.createOutputChannel("Developer Intelligence");
 async function activate(context) {
     exports.logger.show(true);
@@ -20,14 +21,15 @@ async function activate(context) {
     const webhookSender = new webhookSender_1.WebhookSender(supabaseUrl, supabaseKey);
     const activityMonitor = new activityMonitor_1.ActivityMonitor(aggregator);
     activityMonitor.start();
-    const gitListener = new gitListener_1.GitListener(aggregator, activityMonitor, webhookSender);
+    const cameraMonitor = new cameraMonitor_1.CameraMonitor(context.globalState);
+    const gitListener = new gitListener_1.GitListener(aggregator, activityMonitor, webhookSender, cameraMonitor);
     await gitListener.initialize();
     // Register a manual test command
     const testCommand = vscode.commands.registerCommand('devintel.sendTestPing', async () => {
         const session = aggregator.getSession();
         vscode.window.showInformationMessage(`DevIntel: Current Session Duration: ${session.editing_duration_minutes}m. Lines added: ${session.lines_added}`);
     });
-    context.subscriptions.push(activityMonitor, gitListener, testCommand);
+    context.subscriptions.push(activityMonitor, gitListener, cameraMonitor, testCommand);
 }
 function deactivate() {
     // Clean up

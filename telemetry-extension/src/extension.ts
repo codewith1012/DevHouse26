@@ -3,6 +3,7 @@ import { SignalAggregator } from './signalAggregator';
 import { ActivityMonitor } from './activityMonitor';
 import { WebhookSender } from './webhookSender';
 import { GitListener } from './gitListener';
+import { CameraMonitor } from './cameraMonitor';
 
 export const logger = vscode.window.createOutputChannel("Developer Intelligence");
 
@@ -22,7 +23,9 @@ export async function activate(context: vscode.ExtensionContext) {
     const activityMonitor = new ActivityMonitor(aggregator);
     activityMonitor.start();
 
-    const gitListener = new GitListener(aggregator, activityMonitor, webhookSender);
+    const cameraMonitor = new CameraMonitor(context.globalState);
+
+    const gitListener = new GitListener(aggregator, activityMonitor, webhookSender, cameraMonitor);
     await gitListener.initialize();
 
     // Register a manual test command
@@ -34,6 +37,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         activityMonitor,
         gitListener,
+        cameraMonitor,
         testCommand
     );
 }

@@ -31,11 +31,14 @@ export class WebhookSender {
 
         logger.appendLine(`[DEBUG] POST to: ${url}`);
         
+        const jsonBody = JSON.stringify(payload);
+        logger.appendLine(`[DEBUG] Fetch POST Body: ${jsonBody}`);
+
         try {
             const response = await fetch(url, {
                 method: 'POST',
                 headers: headers,
-                body: JSON.stringify(payload)
+                body: jsonBody
             });
 
             if (!response.ok) {
