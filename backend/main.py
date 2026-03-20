@@ -1,6 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from routers import jira
+from services.jira_sync import JiraClient
 import uvicorn
 import os
 from dotenv import load_dotenv
@@ -20,6 +21,28 @@ app.add_middleware(
 
 # Register routers
 app.include_router(jira.router)
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    Triggers JIRA sync automatically when the server starts.
+    """
+    print("[INFO] Server starting... triggering JIRA sync.")
+    client = JiraClient()
+    # Running sync in a simple way for now. 
+    # For very large projects, this could be moved to a background task.
+    try:
+        count = client.sync_all_tickets()
+        print(f"[INFO] Startup sync complete. Synced {count} tickets.")
+    except Exception as e:
+        print(f"[ERROR] Startup sync failed: {e}")
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """
+    Silences the browser's automatic favicon.ico request.
+    """
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 @app.get("/health")
 def health_check():

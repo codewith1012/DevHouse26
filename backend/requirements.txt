@@ -5,3 +5,4 @@ supabase
 sentence-transformers
 requests
 python-dotenv
+gunicorn
