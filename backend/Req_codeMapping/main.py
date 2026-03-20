@@ -85,10 +85,16 @@ DEFAULT_HEADERS = {
 
 app = FastAPI(title="Supabase Commit Sync API")
 # Allow all origins for production access or specific ones if provided
+FRONTEND_URL = os.getenv("FRONTEND_URL") or "http://localhost:5173"
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        FRONTEND_URL.rstrip("/")
+    ],
+    allow_credentials=True,  # Re-enabling because we are using specific origins now!
     allow_methods=["*"],
     allow_headers=["*"],
 )

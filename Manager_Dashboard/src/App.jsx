@@ -27,7 +27,7 @@ const linkedCommitColumns = [
   { key: "repository_name", label: "Repository" },
 ];
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
 const navItems = [
   { id: "overview", label: "Overview" },
@@ -338,7 +338,7 @@ function App() {
                     columns={linkedCommitColumns}
                     rows={filteredLinkedCommitRows.slice(0, 20).map((row) => ({
                       ...row,
-                      commit_id: row.commit_id ? row.commit_id.slice(0, 12) : "N/A",
+                      commit_id: row.commit_id ? String(row.commit_id).slice(0, 12) : "N/A",
                     }))}
                     emptyMessage="No linked commit names available yet."
                   />
@@ -359,7 +359,7 @@ function App() {
                           <div className="chip-row">
                             {issue.commits.map((commit) => (
                               <span key={commit.commit_id} className="chip">
-                                {commit.commit_id.slice(0, 8)} · {commit.message}
+                                {commit.commit_id ? String(commit.commit_id).slice(0, 8) : "N/A"}  {commit.message}
                               </span>
                             ))}
                           </div>
