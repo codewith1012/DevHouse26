@@ -11,14 +11,16 @@ class GitListener {
     activityMonitor;
     webhookSender;
     cameraMonitor;
+    jiraPicker;
     disposables = [];
     lastCommitIds = new Map();
     config;
-    constructor(aggregator, activityMonitor, webhookSender, cameraMonitor) {
+    constructor(aggregator, activityMonitor, webhookSender, cameraMonitor, jiraPicker) {
         this.aggregator = aggregator;
         this.activityMonitor = activityMonitor;
         this.webhookSender = webhookSender;
         this.cameraMonitor = cameraMonitor;
+        this.jiraPicker = jiraPicker;
         this.updateConfig();
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration('devintel')) {
@@ -270,6 +272,7 @@ class GitListener {
             commit_size: calcAdditions + calcDeletions,
             is_merge_commit: stats.isMergeCommit,
             linked_issue: linkedIssue,
+            issue_id: this.jiraPicker.getActiveIssueId(),
             pull_request_number: null, // Hard to detect locally
             pr_title: null,
             pr_labels: [],

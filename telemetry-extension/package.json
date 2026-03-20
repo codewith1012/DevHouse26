@@ -16,6 +16,10 @@
   "contributes": {
     "commands": [
       {
+        "command": "devhouse.selectJiraIssue",
+        "title": "DevHouse: Select Active Jira Issue"
+      },
+      {
         "command": "devintel.sendTestPing",
         "title": "DevIntel: Show Current Session Telemetry"
       }

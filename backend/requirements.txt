@@ -2,7 +2,6 @@ fastapi
 uvicorn
 pydantic
 supabase
-sentence-transformers
 requests
 python-dotenv
 gunicorn
