@@ -36,7 +36,7 @@
         "devintel.developerId": {
           "type": "string",
           "default": "dev_22",
-          "description": "The unique ID of the developer."
+          "description": "Unique ID for telemetry. Defaults to your OS username if left as 'dev_22'."
         },
         "devintel.repositoryName": {
           "type": "string",
