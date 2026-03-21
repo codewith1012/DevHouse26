@@ -68,6 +68,16 @@ class JiraClient:
         except Exception as e:
             print(f"[ERROR] Supabase upsert failed: {e}")
 
+    def delete_from_supabase(self, issue_id: str):
+        """Deletes a Jira ticket from the req_code_mapping table by issue_id."""
+        if not issue_id:
+            return
+
+        try:
+            self.supabase.table("req_code_mapping").delete().eq("issue_id", issue_id).execute()
+        except Exception as e:
+            print(f"[ERROR] Supabase delete failed for {issue_id}: {e}")
+
     def sync_all_tickets(self) -> int:
         """Fetches all tickets from the defined Jira project and syncs them to Supabase."""
         synced_count = 0
