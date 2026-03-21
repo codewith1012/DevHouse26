@@ -1,86 +1,38 @@
 import json
+import math
 import os
-import re
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional
 from urllib import error, parse, request
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 
 ROOT_DIR = Path(__file__).resolve().parent
 load_dotenv()
 
-STOP_WORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "at",
-    "be",
-    "by",
-    "create",
-    "file",
-    "for",
-    "from",
-    "in",
-    "into",
-    "is",
-    "it",
-    "of",
-    "on",
-    "or",
-    "python",
-    "screen",
-    "task",
-    "that",
-    "the",
-    "this",
-    "to",
-    "using",
-    "where",
-    "with",
-}
-
-COMMON_CODE_WORDS = {
-    "added",
-    "branch",
-    "change",
-    "commit",
-    "diff",
-    "false",
-    "index",
-    "json",
-    "line",
-    "master",
-    "mode",
-    "modified",
-    "new",
-    "null",
-    "true",
-}
-
-SORT_TERMS = {"sort", "sorted", "sorting", "bubble", "merge", "quick", "insertion", "selection", "heap"}
-MIN_SCORE = 5.8
-MAX_MATCHES_PER_ISSUE = 8
-
-
-# Environment Variables are now loaded via load_dotenv()
-
 SUPABASE_URL = os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY")
+SUPABASE_API_KEY = (
+    os.getenv("SUPABASE_SERVICE_KEY")
+    or os.getenv("SUPABASE_ANON_KEY")
+    or os.getenv("VITE_SUPABASE_ANON_KEY")
+)
+BASE_REST_URL = f"{(SUPABASE_URL or '').rstrip('/')}/rest/v1"
 
-if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+FASTEMBED_MODEL_NAME = os.getenv("REQ_MATCH_MODEL", "BAAI/bge-small-en-v1.5")
+MATCH_THRESHOLD = float(os.getenv("REQ_MATCH_THRESHOLD", "0.45"))
+AUTO_SYNC_ON_DASHBOARD = os.getenv("AUTO_SYNC_ON_DASHBOARD", "true").strip().lower() == "true"
+MAX_PATCH_CHARS = int(os.getenv("REQ_MATCH_MAX_PATCH_CHARS", "4000"))
+MAX_COMMIT_TEXT_CHARS = int(os.getenv("REQ_MATCH_MAX_COMMIT_TEXT_CHARS", "12000"))
+
+if not SUPABASE_URL or not SUPABASE_API_KEY:
     print("WARNING: Missing Supabase credentials! The service will not be able to sync.")
 
-BASE_REST_URL = f"{(SUPABASE_URL or '').rstrip('/')}/rest/v1"
 DEFAULT_HEADERS = {
-    "apikey": SUPABASE_ANON_KEY,
-    "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+    "apikey": SUPABASE_API_KEY,
+    "Authorization": f"Bearer {SUPABASE_API_KEY}",
 }
 
 app = FastAPI(title="Supabase Commit Sync API")
@@ -106,17 +58,38 @@ def parse_allowed_origins() -> list[str]:
     return origins
 
 
-ALLOWED_ORIGINS = parse_allowed_origins()
-AUTO_SYNC_ON_DASHBOARD = os.getenv("AUTO_SYNC_ON_DASHBOARD", "false").strip().lower() == "true"
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=parse_allowed_origins(),
     allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@lru_cache(maxsize=1)
+def get_embedder():
+    from fastembed import TextEmbedding
+
+    return TextEmbedding(model_name=FASTEMBED_MODEL_NAME)
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    cleaned = [normalize_spaces(text) for text in texts]
+    if not cleaned:
+        return []
+    embeddings = list(get_embedder().embed(cleaned))
+    return [[float(value) for value in vector.tolist()] for vector in embeddings]
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    numerator = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return numerator / (left_norm * right_norm)
 
 
 @app.get("/api/health")
@@ -157,60 +130,57 @@ def sync_endpoint() -> dict[str, Any]:
     return sync_commit_links()
 
 
+@app.post("/api/match-commit")
+def match_commit_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    event = extract_event_from_payload(payload)
+    return process_single_commit_event(event)
+
+
+@app.post("/api/extension-events/webhook")
+def extension_events_webhook(payload: dict[str, Any]) -> dict[str, Any]:
+    event_type = str(payload.get("type") or payload.get("eventType") or payload.get("event_type") or "").lower()
+    if event_type and "insert" not in event_type and "create" not in event_type:
+        return {"status": "ignored", "reason": f"unsupported_event_type:{event_type}"}
+
+    event = extract_event_from_payload(payload)
+    return process_single_commit_event(event)
+
+
 def sync_commit_links() -> dict[str, Any]:
-    issues = get_rows(
-        "req_code_mapping",
-        "issue_id,title,description,commits",
-        order="created_at.asc",
-        limit=500,
-    )
-    events = get_rows(
-        "extension_events",
-        "commit_id,message,timestamp,files,files_json,diff_patch,repository_name,branch,issue_id",
-        order="timestamp.asc",
-        limit=500,
-    )
+    issues = fetch_issues()
+    events = fetch_events()
     valid_event_commit_ids = {
         str(event.get("commit_id"))
         for event in events
         if event.get("commit_id") is not None and str(event.get("commit_id")).strip()
     }
 
-    all_potential_links: list[dict[str, Any]] = []
-    for issue in issues:
-        matches = rank_issue_matches(issue, events)
-        for match in matches:
-            all_potential_links.append(
-                {
-                    "issue_id": issue["issue_id"],
-                    "commit_id": match["commit_id"],
-                    "score": match["score"],
-                    "reasons": match.get("reasons", []),
-                }
-            )
-
-    # Sort all potential links across all issues by score (highest first)
-    all_potential_links.sort(key=lambda x: x["score"], reverse=True)
-
-    assigned_commits = set()
     issue_to_commits: dict[str, list[str]] = {str(issue["issue_id"]): [] for issue in issues}
-    
-    # Store reasoning for the dashboard response
     issue_to_matches: dict[str, list[dict[str, Any]]] = {str(issue["issue_id"]): [] for issue in issues}
 
-    for link in all_potential_links:
-        issue_id_str = str(link["issue_id"])
-        commit_id = link["commit_id"]
-        
-        # Ensure a commit is only mapped to ONE requirement (the one with highest score)
-        if commit_id not in assigned_commits and len(issue_to_commits[issue_id_str]) < MAX_MATCHES_PER_ISSUE:
-            issue_to_commits[issue_id_str].append(commit_id)
-            issue_to_matches[issue_id_str].append({
-                "commit_id": commit_id,
-                "score": link["score"],
-                "reasons": link["reasons"]
-            })
-            assigned_commits.add(commit_id)
+    commit_rows = []
+    for event in events:
+        commit_id = str(event.get("commit_id") or "").strip()
+        commit_text = build_commit_text(event)
+        if commit_id and commit_text:
+            commit_rows.append({"commit_id": commit_id, "text": commit_text})
+
+    match_results = match_commit_rows(commit_rows, issues)
+    for result in match_results:
+        if not result.get("issue_id"):
+            continue
+        issue_id = str(result["issue_id"])
+        issue_to_commits[issue_id].append(str(result["commit_id"]))
+        issue_to_matches[issue_id].append(
+            {
+                "commit_id": str(result["commit_id"]),
+                "score": round(float(result["score"]), 4),
+                "reasons": [
+                    f"fastembed cosine similarity via {FASTEMBED_MODEL_NAME}",
+                    f"threshold {MATCH_THRESHOLD:.2f}",
+                ],
+            }
+        )
 
     updates: list[dict[str, Any]] = []
     matched_issue_count = 0
@@ -218,14 +188,13 @@ def sync_commit_links() -> dict[str, Any]:
 
     for issue in issues:
         issue_id = str(issue["issue_id"])
-        matched_commit_ids = issue_to_commits[issue_id]
+        matched_commit_ids = dedupe_preserve_order(issue_to_commits[issue_id])
         existing = [
             str(commit_id)
             for commit_id in (issue.get("commits") or [])
             if commit_id is not None and str(commit_id).strip() and str(commit_id) in valid_event_commit_ids
         ]
 
-        # Only patch if the list of commits has changed
         if sorted(matched_commit_ids) != sorted(existing):
             patch_row(
                 "req_code_mapping",
@@ -237,11 +206,13 @@ def sync_commit_links() -> dict[str, Any]:
             matched_issue_count += 1
             total_linked_commits += len(matched_commit_ids)
 
-        updates.append({
-            "issue_id": issue_id,
-            "commits": matched_commit_ids,
-            "matches": issue_to_matches[issue_id]
-        })
+        updates.append(
+            {
+                "issue_id": issue_id,
+                "commits": matched_commit_ids,
+                "matches": issue_to_matches[issue_id],
+            }
+        )
 
     return {
         "updated_issues": len(updates),
@@ -249,6 +220,136 @@ def sync_commit_links() -> dict[str, Any]:
         "linked_commits": total_linked_commits,
         "updates": updates,
     }
+
+
+def process_single_commit_event(event: dict[str, Any]) -> dict[str, Any]:
+    commit_id = str(event.get("commit_id") or "").strip()
+    if not commit_id:
+        raise HTTPException(status_code=400, detail="Missing commit_id in payload")
+
+    issues = fetch_issues()
+    commit_text = build_commit_text(event)
+    if not commit_text:
+        return {
+            "status": "ignored",
+            "reason": "empty_commit_text",
+            "commit_id": commit_id,
+        }
+
+    matches = match_commit_rows([{"commit_id": commit_id, "text": commit_text}], issues)
+    match = matches[0] if matches else None
+    update_commit_mapping(commit_id, match, issues)
+
+    if not match:
+        return {
+            "status": "unmapped",
+            "commit_id": commit_id,
+            "threshold": MATCH_THRESHOLD,
+        }
+
+    return {
+        "status": "mapped",
+        "commit_id": commit_id,
+        "issue_id": match["issue_id"],
+        "score": round(float(match["score"]), 4),
+        "threshold": MATCH_THRESHOLD,
+    }
+
+
+def fetch_issues() -> list[dict[str, Any]]:
+    return get_rows(
+        "req_code_mapping",
+        "issue_id,title,description,commits",
+        order="created_at.asc",
+        limit=500,
+    )
+
+
+def fetch_events() -> list[dict[str, Any]]:
+    return get_rows(
+        "extension_events",
+        "commit_id,message,timestamp,files,files_json,diff_patch,repository_name,branch",
+        order="timestamp.asc",
+        limit=500,
+    )
+
+
+def match_commit_rows(commit_rows: list[dict[str, str]], issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    issue_rows = [
+        {"issue_id": str(issue.get("issue_id") or "").strip(), "text": build_requirement_text(issue)}
+        for issue in issues
+    ]
+    issue_rows = [issue for issue in issue_rows if issue["issue_id"] and issue["text"]]
+    if not issue_rows or not commit_rows:
+        return []
+
+    issue_embeddings = embed_texts([f"passage: {issue['text']}" for issue in issue_rows])
+    commit_embeddings = embed_texts([f"query: {commit['text']}" for commit in commit_rows])
+    results: list[dict[str, Any]] = []
+
+    for commit_row, commit_embedding in zip(commit_rows, commit_embeddings):
+        best_issue_id = None
+        best_score = -1.0
+
+        for issue_row, issue_embedding in zip(issue_rows, issue_embeddings):
+            score = cosine_similarity(commit_embedding, issue_embedding)
+            if score > best_score:
+                best_score = score
+                best_issue_id = issue_row["issue_id"]
+
+        if best_issue_id and best_score >= MATCH_THRESHOLD:
+            results.append(
+                {
+                    "commit_id": commit_row["commit_id"],
+                    "issue_id": best_issue_id,
+                    "score": best_score,
+                }
+            )
+        else:
+            results.append(
+                {
+                    "commit_id": commit_row["commit_id"],
+                    "issue_id": None,
+                    "score": best_score,
+                }
+            )
+
+    return results
+
+
+def update_commit_mapping(commit_id: str, match: Optional[dict[str, Any]], issues: list[dict[str, Any]]) -> None:
+    target_issue_id = str(match.get("issue_id") or "") if match else ""
+
+    for issue in issues:
+        issue_id = str(issue.get("issue_id") or "")
+        existing = [str(value) for value in (issue.get("commits") or []) if str(value).strip()]
+
+        if issue_id == target_issue_id:
+            updated = dedupe_preserve_order([*existing, commit_id])
+        else:
+            updated = [value for value in existing if value != commit_id]
+
+        if updated != existing:
+            patch_row(
+                "req_code_mapping",
+                f"issue_id=eq.{parse.quote(issue_id)}",
+                {"commits": updated},
+            )
+
+
+def extract_event_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    for key in ("record", "new", "data"):
+        candidate = payload.get(key)
+        if isinstance(candidate, dict) and candidate.get("commit_id"):
+            return candidate
+
+    if payload.get("commit_id"):
+        return payload
+
+    raise HTTPException(status_code=400, detail="No commit record found in payload")
 
 
 def summarize_current_links(issues: list[dict[str, Any]]) -> dict[str, Any]:
@@ -269,268 +370,63 @@ def summarize_current_links(issues: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def rank_issue_matches(issue: dict[str, Any], events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    issue_id = str(issue.get("issue_id", ""))
-    issue_text = " ".join(filter(None, [issue.get("title"), issue.get("description")]))
-    issue_profile = build_issue_profile(issue_text)
-    event_profiles = [build_event_profile(event) for event in events]
-    ml_scores = compute_ml_scores(issue_profile["ml_text"], [profile["ml_text"] for profile in event_profiles])
-    results: list[dict[str, Any]] = []
-
-    for event, event_profile, ml_score in zip(events, event_profiles, ml_scores):
-        score, reasons = score_event_match(issue_id, issue_profile, event_profile, event, ml_score)
-        if score >= MIN_SCORE:
-            results.append({"commit_id": event["commit_id"], "score": round(score, 2), "reasons": reasons})
-
-    results.sort(key=lambda item: (-item["score"], item["commit_id"]))
-    return results[:MAX_MATCHES_PER_ISSUE]
+def build_requirement_text(issue: dict[str, Any]) -> str:
+    parts = [
+        str(issue.get("issue_id") or ""),
+        str(issue.get("title") or ""),
+        str(issue.get("description") or ""),
+    ]
+    return normalize_spaces(" ".join(parts))
 
 
-def compute_ml_scores(issue_text: str, event_texts: list[str]) -> list[float]:
-    if not event_texts:
-        return []
+def build_commit_text(event: dict[str, Any]) -> str:
+    files = extract_event_files(event)
+    segments = [str(event.get("message") or "").strip()]
 
-    documents = [issue_text, *event_texts]
-    vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words="english", sublinear_tf=True, min_df=1)
-    matrix = vectorizer.fit_transform(documents)
-    similarities = sklearn_cosine_similarity(matrix[0:1], matrix[1:]).flatten()
-    return [float(score) for score in similarities]
+    for file in files:
+        file_path = str(file.get("file_path") or "").strip()
+        patch = str(file.get("patch") or "").strip()
+        if patch:
+            patch = patch[:MAX_PATCH_CHARS]
+        piece = normalize_spaces(" ".join(part for part in [file_path, patch] if part))
+        if piece:
+            segments.append(piece)
 
+    diff_patch = str(event.get("diff_patch") or "").strip()
+    if diff_patch:
+        segments.append(diff_patch[:MAX_PATCH_CHARS])
 
-def score_event_match(
-    issue_id: str,
-    issue_profile: dict[str, Any],
-    event_profile: dict[str, Any],
-    event: dict[str, Any],
-    ml_similarity: float,
-) -> tuple[float, list[str]]:
-    score = 0.0
-    reasons: list[str] = []
-    explicit_issue_id = str(event.get("issue_id") or "")
-
-    if explicit_issue_id and explicit_issue_id.lower() == issue_id.lower():
-        score += 12.0
-        reasons.append("explicit issue_id match")
-
-    if ml_similarity > 0:
-        ml_score = ml_similarity * 18.0
-        score += ml_score
-        reasons.append(f"ml nlp similarity: {ml_similarity:.2f}")
-
-    overlap = issue_profile["tokens"] & event_profile["tokens"]
-    significant_overlap = [token for token in overlap if token not in COMMON_CODE_WORDS]
-    if significant_overlap:
-        overlap_score = min(sum(token_weight(token) for token in significant_overlap), 6.5)
-        score += overlap_score
-        reasons.append(f"token overlap: {', '.join(sorted(significant_overlap)[:6])}")
-
-    code_overlap = issue_profile["code_tokens"] & event_profile["code_tokens"]
-    if code_overlap:
-        code_score = min(sum(token_weight(token) for token in code_overlap), 5.0)
-        score += code_score
-        reasons.append(f"code overlap: {', '.join(sorted(code_overlap)[:6])}")
-
-    filename_bonus = score_filename_matches(issue_profile["tokens"], event_profile["file_paths"])
-    if filename_bonus:
-        score += filename_bonus
-        reasons.append("filename aligns with issue text")
-
-    phrase_bonus = score_phrase_matches(issue_profile["normalized_text"], event_profile["combined_lower"])
-    if phrase_bonus:
-        score += phrase_bonus
-        reasons.append("shared issue/code phrases")
-
-    pattern_bonus = score_code_patterns(issue_profile, event_profile)
-    if pattern_bonus:
-        score += pattern_bonus
-        reasons.append("code pattern support")
-
-    if not significant_overlap and not code_overlap and ml_similarity < 0.12 and phrase_bonus == 0:
-        score = 0.0
-
-    return score, reasons
+    return normalize_spaces(" ".join(segments))[:MAX_COMMIT_TEXT_CHARS]
 
 
-def build_issue_profile(issue_text: str) -> dict[str, Any]:
-    normalized_text = normalize_spaces(issue_text.lower())
-    tokens = tokenize_text(issue_text)
-    code_tokens = extract_code_like_tokens(issue_text)
+def extract_event_files(event: dict[str, Any]) -> list[dict[str, Any]]:
+    direct_files = event.get("files")
+    if isinstance(direct_files, list):
+        return [file for file in direct_files if isinstance(file, dict)]
 
-    return {
-        "normalized_text": normalized_text,
-        "tokens": set(tokens),
-        "code_tokens": set(code_tokens),
-        "ml_text": build_ml_text(issue_text, tokens, code_tokens),
-    }
+    files_json = event.get("files_json")
+    if isinstance(files_json, dict):
+        nested_files = files_json.get("files")
+        if isinstance(nested_files, list):
+            return [file for file in nested_files if isinstance(file, dict)]
+    if isinstance(files_json, list):
+        return [file for file in files_json if isinstance(file, dict)]
 
-
-def build_event_profile(event: dict[str, Any]) -> dict[str, Any]:
-    files = event.get("files") or []
-    file_paths = [str(file.get("file_path", "")) for file in files]
-    patch_chunks = [str(file.get("patch", "")) for file in files]
-    message_text = str(event.get("message", ""))
-    branch_text = str(event.get("branch", ""))
-    repo_text = str(event.get("repository_name", ""))
-    string_literals = extract_string_literals("\n".join(patch_chunks))
-    identifiers = extract_identifiers("\n".join(patch_chunks))
-    added_lines = extract_added_lines(patch_chunks)
-
-    combined_text = "\n".join(
-        [message_text, branch_text, repo_text, " ".join(file_paths), " ".join(string_literals), " ".join(identifiers), " ".join(added_lines), "\n".join(patch_chunks)]
-    )
-
-    text_tokens = tokenize_text(combined_text)
-    code_tokens = extract_code_like_tokens(" ".join([" ".join(file_paths), " ".join(identifiers), " ".join(string_literals), " ".join(added_lines)]))
-
-    return {
-        "file_paths": file_paths,
-        "combined_lower": combined_text.lower(),
-        "patch_chunks": patch_chunks,
-        "tokens": set(text_tokens),
-        "code_tokens": set(code_tokens),
-        "ml_text": build_ml_text(combined_text, text_tokens, code_tokens),
-    }
+    return []
 
 
-def build_ml_text(source_text: str, tokens: list[str], code_tokens: list[str]) -> str:
-    weighted_text = [source_text]
-    weighted_text.extend(tokens)
-    weighted_text.extend(code_tokens)
-    weighted_text.extend(code_tokens)
-    return " ".join(weighted_text)
-
-
-def tokenize_text(text: str) -> list[str]:
-    raw_tokens = re.findall(r"[A-Za-z0-9_]+", text)
-    expanded_tokens: list[str] = []
-    for token in raw_tokens:
-        expanded_tokens.extend(split_identifier(token))
-    normalized = [normalize_token(token) for token in expanded_tokens]
-    return [token for token in normalized if token and token not in STOP_WORDS]
-
-
-def extract_code_like_tokens(text: str) -> list[str]:
-    identifiers = extract_identifiers(text)
-    string_literals = extract_string_literals(text)
-    tokens: list[str] = []
-    for item in identifiers + string_literals:
-        tokens.extend(tokenize_text(item))
-    return tokens
-
-
-def extract_identifiers(text: str) -> list[str]:
-    identifiers = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text)
-    return [identifier for identifier in identifiers if identifier.lower() not in STOP_WORDS]
-
-
-def extract_string_literals(text: str) -> list[str]:
-    matches = re.findall(r'"([^"\\]{2,})"|\'([^\'\\]{2,})\'', text)
-    values: list[str] = []
-    for left, right in matches:
-        literal = left or right
-        if literal:
-            values.append(literal)
-    return values
-
-
-def extract_added_lines(patch_chunks: list[str]) -> list[str]:
-    lines: list[str] = []
-    for chunk in patch_chunks:
-        for line in chunk.splitlines():
-            if line.startswith("+") and not line.startswith("+++"):
-                lines.append(line[1:].strip())
-    return lines
-
-
-def split_identifier(token: str) -> list[str]:
-    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", token.replace("_", " ").replace("-", " "))
-    return [part for part in spaced.split() if part]
-
-
-def normalize_token(token: str) -> str:
-    lowered = token.lower()
-    lowered = re.sub(r"[^a-z0-9]+", "", lowered)
-    if len(lowered) <= 2:
-        return ""
-    for suffix in ("ing", "ers", "ies", "ied", "er", "ed", "es", "s"):
-        if lowered.endswith(suffix) and len(lowered) - len(suffix) >= 3:
-            return lowered[: -len(suffix)] + ("y" if suffix in {"ies", "ied"} else "")
-    return lowered
-
-
-def score_filename_matches(issue_tokens: set[str], file_paths: list[str]) -> float:
-    if not issue_tokens or not file_paths:
-        return 0.0
-    normalized_paths = [path.lower() for path in file_paths if path and not path.lower().startswith(".devpulse/")]
-    if not normalized_paths:
-        return 0.0
-
-    score = 0.0
-    for token in issue_tokens:
-        for path in normalized_paths:
-            filename = path.split("/")[-1]
-            if token in filename:
-                score += 2.0
-                break
-    return min(score, 5.0)
-
-
-def score_phrase_matches(issue_text_lower: str, combined_lower: str) -> float:
-    score = 0.0
-    quoted_phrases = re.findall(r'"([^\"]+)"', issue_text_lower)
-    for phrase in quoted_phrases:
-        phrase = normalize_spaces(phrase)
-        if phrase and phrase in normalize_spaces(combined_lower):
-            score += 4.0
-
-    issue_bigrams = extract_ngrams(issue_text_lower, 2)
-    event_bigrams = extract_ngrams(combined_lower, 2)
-    shared_bigrams = issue_bigrams & event_bigrams
-    score += min(len(shared_bigrams) * 1.25, 4.0)
-    return score
-
-
-def score_code_patterns(issue_profile: dict[str, Any], event_profile: dict[str, Any]) -> float:
-    score = 0.0
-    patch_text = "\n".join(event_profile["patch_chunks"]).lower()
-    issue_tokens = issue_profile["tokens"]
-
-    if "print" in issue_tokens and "print(" in patch_text:
-        score += 2.0
-    if "name" in issue_tokens and re.search(r'print\(("|\').+("|\')\)', patch_text):
-        score += 2.5
-    if issue_tokens & SORT_TERMS:
-        sort_hits = sum(1 for term in SORT_TERMS if term in patch_text)
-        score += min(sort_hits * 1.6, 4.8)
-    if ("create" in issue_tokens or "file" in issue_tokens) and "new file mode" in patch_text:
-        score += 1.5
-
-    return score
-
-
-def extract_ngrams(text: str, size: int) -> set[str]:
-    tokens = tokenize_text(text)
-    if len(tokens) < size:
-        return set()
-    return {" ".join(tokens[index : index + size]) for index in range(len(tokens) - size + 1)}
-
-
-def token_weight(token: str) -> float:
-    if token.isdigit():
-        return 1.0
-    if token in SORT_TERMS:
-        return 2.4
-    if len(token) >= 9:
-        return 2.6
-    if len(token) >= 6:
-        return 2.1
-    if len(token) >= 4:
-        return 1.6
-    return 1.2
+def dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
 
 
 def normalize_spaces(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+    return " ".join(str(text or "").split())
 
 
 def get_rows(table: str, select: str, order: Optional[str] = None, limit: Optional[int] = None) -> list[dict[str, Any]]:
@@ -559,7 +455,7 @@ def request_json(method: str, url: str, payload: Optional[Any] = None, headers: 
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     req = request.Request(url, method=method, headers=headers or DEFAULT_HEADERS, data=data)
     try:
-        with request.urlopen(req, timeout=30) as response:
+        with request.urlopen(req, timeout=60) as response:
             body = response.read().decode("utf-8")
             return json.loads(body) if body else None
     except error.HTTPError as exc:

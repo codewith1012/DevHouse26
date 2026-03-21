@@ -4,7 +4,7 @@ FROM python:3.9-slim
 # Set the working directory in the container
 WORKDIR /app
 
-# Install system dependencies for scikit-learn
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/cache/*
@@ -19,10 +19,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Set environment variables
-ENV PORT=8000
+ENV PORT=10000
 
-# Make port 8000 available to the world outside this container
-EXPOSE 8000
+# Make port 10000 available to the world outside this container
+EXPOSE 10000
 
 # Run the application using gunicorn with uvicorn workers for production
-CMD gunicorn -w 1 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:$PORT
+CMD gunicorn -w 1 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:${PORT:-10000}
