@@ -57,7 +57,18 @@ def main():
             print("[detect_face] Camera opened, but no frame could be read", file=sys.stderr)
             return
 
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        cascade_path = os.path.join(os.path.dirname(cv2.__file__), 'data', 'haarcascade_frontalface_default.xml')
+        if not os.path.exists(cascade_path):
+            # fallback to common system paths on Linux
+            fallback_paths = [
+                '/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml',
+                '/usr/share/opencv/haarcascades/haarcascade_frontalface_default.xml',
+            ]
+            for p in fallback_paths:
+                if os.path.exists(p):
+                    cascade_path = p
+                    break
+
         if not os.path.exists(cascade_path):
             print("0")
             print(f"[detect_face] Cascade file missing: {cascade_path}", file=sys.stderr)
@@ -65,7 +76,7 @@ def main():
 
         face_cascade = cv2.CascadeClassifier(cascade_path)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
 
         if len(faces) > 0:
             print("1")

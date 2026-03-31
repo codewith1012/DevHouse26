@@ -26,7 +26,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const cameraMonitor = new CameraMonitor(context.globalState);
 
-    const jiraPicker = new JiraPicker();
+    const jiraPicker = new JiraPicker(context);
     setTimeout(() => {
         jiraPicker.fetchAndPrompt();
     }, 1000); // Small delay to let git warm up

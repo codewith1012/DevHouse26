@@ -7,14 +7,21 @@ class JiraPicker {
     activeIssueId = null;
     statusBarItem;
     issues = [];
-    constructor() {
+    context;
+    constructor(context) {
+        this.context = context;
         this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
         this.statusBarItem.command = 'devhouse.selectJiraIssue';
+        // Restore from persistence
+        this.activeIssueId = this.context.globalState.get('devintel.activeIssueId', null);
         this.updateStatusBar();
     }
     async fetchAndPrompt() {
         await this.fetchIssues();
-        await this.showPicker();
+        // Only prompt if nothing is selected or if we want to refresh
+        if (!this.activeIssueId) {
+            await this.showPicker();
+        }
     }
     async fetchIssues() {
         const config = vscode.workspace.getConfiguration('devintel');
@@ -72,6 +79,7 @@ class JiraPicker {
                 this.activeIssueId = selected.issue_id;
             }
             this.updateStatusBar();
+            this.context.globalState.update('devintel.activeIssueId', this.activeIssueId);
             extension_1.logger.appendLine(`[JIRA] Selected issue: ${this.activeIssueId || 'None'}`);
         }
     }
