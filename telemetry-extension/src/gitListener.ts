@@ -84,8 +84,11 @@ export class GitListener {
                 this.lastCommitIds.set(repo.rootUri.toString(), repo.state.HEAD.commit);
             }
 
-            // Sync any existing events that haven't been sent yet
-            await this.syncExistingEvents(repoPath);
+            // Initial setup and backfill (Asynchronous)
+            this.ensureDotDevPulseFolders(repoPath);
+            this.backfillHistoricalCommits(repoPath, repo).catch(err => {
+                logger.appendLine(`[BACKFILL] [ERROR] Backfill failed: ${err}`);
+            });
 
             // 1. Listen to internal VS Code Git state changes
             this.disposables.push(
@@ -121,9 +124,106 @@ export class GitListener {
         }
     }
 
+    private ensureDotDevPulseFolders(repoPath: string) {
+        const { eventsDir, syncedDir } = this.getEventStoragePaths(repoPath);
+        const devPulseDir = path.dirname(eventsDir);
+
+        if (!fs.existsSync(devPulseDir)) {
+            fs.mkdirSync(devPulseDir, { recursive: true });
+        }
+        if (!fs.existsSync(eventsDir)) {
+            fs.mkdirSync(eventsDir, { recursive: true });
+        }
+        if (!fs.existsSync(syncedDir)) {
+            fs.mkdirSync(syncedDir, { recursive: true });
+        }
+
+        // Create .devpulse/.gitignore if it doesn't exist
+        const devpulseGitignore = path.join(devPulseDir, '.gitignore');
+        if (!fs.existsSync(devpulseGitignore)) {
+            fs.writeFileSync(devpulseGitignore, '*\n', 'utf8');
+            logger.appendLine(`[INIT] Created ${devpulseGitignore} with '*'`);
+        }
+
+        // Add .devpulse/ to root .gitignore
+        const rootGitignore = path.join(repoPath, '.gitignore');
+        try {
+            if (fs.existsSync(rootGitignore)) {
+                const content = fs.readFileSync(rootGitignore, 'utf8');
+                const lines = content.split(/\r?\n/);
+                if (!lines.some(line => line.trim() === '.devpulse' || line.trim() === '.devpulse/')) {
+                    fs.appendFileSync(rootGitignore, '\n.devpulse/\n');
+                    logger.appendLine(`[INIT] Added .devpulse/ to root ${rootGitignore}`);
+                }
+            } else {
+                fs.writeFileSync(rootGitignore, '.devpulse/\n', 'utf8');
+                logger.appendLine(`[INIT] Created root ${rootGitignore} with .devpulse/`);
+            }
+        } catch (err) {
+            logger.appendLine(`[ERROR] Failed to update root .gitignore: ${err}`);
+        }
+    }
+
+    private async backfillHistoricalCommits(repoPath: string, repo: any) {
+        logger.appendLine(`[BACKFILL] Starting scan for historical commits in ${repoPath}`);
+        
+        const { exec } = await import('child_process');
+        const { promisify } = await import('util');
+        const execAsync = promisify(exec);
+
+        try {
+            // Get last 50 commit hashes from HEAD
+            const { stdout: logOut } = await execAsync(`git log -n 50 --format=%H`, { cwd: repoPath });
+            const allHashes = logOut.trim().split('\n').filter(h => h.length > 0);
+            
+            const { syncedDir } = this.getEventStoragePaths(repoPath);
+            const unsyncedHashes = allHashes.filter(h => !fs.existsSync(path.join(syncedDir, `${h}.json`)));
+
+            if (unsyncedHashes.length === 0) {
+                logger.appendLine(`[BACKFILL] All recent commits are already synced.`);
+                return;
+            }
+
+            logger.appendLine(`[BACKFILL] Found ${unsyncedHashes.length} unsynced historical commits.`);
+
+            let syncedCount = 0;
+            // Process in reverse (oldest unsynced first)
+            for (const hash of unsyncedHashes.reverse()) {
+                try {
+                    const stats = await this.getCommitStats(hash, repoPath);
+                    if (stats.files.length === 0 && stats.additions === 0 && stats.deletions === 0) {
+                        logger.appendLine(`[BACKFILL] [SKIP] Commit ${hash.substring(0, 7)} has no changes.`);
+                        continue;
+                    }
+
+                    const event = this.buildSupaBaseEvent(stats, repo.state.HEAD?.name || 'main', repoPath);
+                    const filePath = await this.saveEventLocally(event, repoPath);
+
+                    if (filePath) {
+                        const success = await this.webhookSender.sendToSupabase(event);
+                        if (success) {
+                            this.moveToSynced(filePath);
+                            syncedCount++;
+                            logger.appendLine(`[BACKFILL] Sent commit ${hash.substring(0, 7)}`);
+                        }
+                    }
+                } catch (err) {
+                    logger.appendLine(`[BACKFILL] [ERROR] Failed to process commit ${hash.substring(0, 7)}: ${err}`);
+                }
+            }
+
+            logger.appendLine(`[BACKFILL] Complete. ${syncedCount}/${unsyncedHashes.length} commits synced.`);
+            
+            // Finally, sync any events that might still be in eventsDir but weren't part of the log scan
+            await this.syncExistingEvents(repoPath);
+            
+        } catch (err) {
+            logger.appendLine(`[BACKFILL] [ERROR] Historical scan failed: ${err}`);
+        }
+    }
+
     private async syncExistingEvents(repoPath: string) {
-        const eventsDir = path.join(repoPath, '.devpulse', 'events');
-        const syncedDir = path.join(eventsDir, 'synced');
+        const { eventsDir, syncedDir } = this.getEventStoragePaths(repoPath);
         
         if (!fs.existsSync(eventsDir)) return;
         if (!fs.existsSync(syncedDir)) {
@@ -194,7 +294,7 @@ export class GitListener {
                     return;
                 }
 
-                const supabaseEvent = this.buildSupaBaseEvent(stats, head.name || 'main');
+                const supabaseEvent = this.buildSupaBaseEvent(stats, head.name || 'main', repoPath);
                 
                 // Process locally: Save to JSON file
                 const filePath = await this.saveEventLocally(supabaseEvent, repoPath);
@@ -300,7 +400,7 @@ export class GitListener {
         return map[ext.toLowerCase()] || 'text';
     }
 
-    private buildSupaBaseEvent(stats: any, branchName: string): SupaBaseEvent {
+    private buildSupaBaseEvent(stats: any, branchName: string, repoPath: string): SupaBaseEvent {
         const session = this.aggregator.getSession();
         
         const issueMatch = stats.message.match(/#(\d+)/) || stats.message.match(/([A-Z]{2,}-\d+)/);
@@ -315,6 +415,8 @@ export class GitListener {
         const calcAdditions = filteredFiles.reduce((acc: number, f: any) => acc + (f.additions || 0), 0);
         const calcDeletions = filteredFiles.reduce((acc: number, f: any) => acc + (f.deletions || 0), 0);
 
+        const repositoryName = path.basename(repoPath) || this.config.repositoryName;
+
         return {
             event_type: "commit_event",
             schema_version: "1.1", // Bumped version
@@ -324,7 +426,7 @@ export class GitListener {
             author_email: stats.authorEmail,
             message: stats.message,
             repository_owner: stats.repositoryOwner,
-            repository_name: this.config.repositoryName,
+            repository_name: repositoryName,
             timestamp: stats.timestamp,
             branch: branchName,
             additions: calcAdditions,
@@ -370,6 +472,12 @@ export class GitListener {
             const fileName = `${event.commit_id}.json`;
             const filePath = path.join(devPulseDir, fileName);
             fs.writeFileSync(filePath, JSON.stringify(event, null, 2));
+
+            // Ensure directory exists for synced as well
+            const syncedDir = path.join(repoPath, '.devpulse', 'synced');
+            if (!fs.existsSync(syncedDir)) {
+                fs.mkdirSync(syncedDir, { recursive: true });
+            }
             
             logger.appendLine(`[LOCAL] Saved commit data to: ${filePath}`);
             return filePath;
@@ -381,9 +489,9 @@ export class GitListener {
 
     private moveToSynced(filePath: string): boolean {
         try {
-            const dir = path.dirname(filePath);
             const fileName = path.basename(filePath);
-            const syncedDir = path.join(dir, 'synced');
+            const repoPath = path.dirname(path.dirname(path.dirname(filePath))); // .devpulse/events/file -> repoPath
+            const { syncedDir } = this.getEventStoragePaths(repoPath);
             
             if (!fs.existsSync(syncedDir)) {
                 fs.mkdirSync(syncedDir, { recursive: true });
@@ -396,7 +504,7 @@ export class GitListener {
 
             fs.copyFileSync(filePath, destPath);
             fs.unlinkSync(filePath);
-            logger.appendLine(`[SYNC] Moved to synced folder: ${fileName}`);
+            // logger.appendLine(`[SYNC] Moved to synced folder: ${fileName}`);
             return true;
         } catch (err) {
             logger.appendLine(`[ERROR] Failed to move file to synced: ${err}`);
@@ -406,7 +514,7 @@ export class GitListener {
 
     private getEventStoragePaths(repoPath: string): { eventsDir: string; syncedDir: string } {
         const eventsDir = path.join(repoPath, '.devpulse', 'events');
-        const syncedDir = path.join(eventsDir, 'synced');
+        const syncedDir = path.join(repoPath, '.devpulse', 'synced');
         return { eventsDir, syncedDir };
     }
 
@@ -465,7 +573,8 @@ export class GitListener {
             }
         }
 
-        const remoteCommitIds = await this.webhookSender.fetchRemoteCommitIds(this.config.developerId, this.config.repositoryName);
+        const repositoryName = path.basename(repoPath) || this.config.repositoryName;
+        const remoteCommitIds = await this.webhookSender.fetchRemoteCommitIds(this.config.developerId, repositoryName);
         for (const commitId of remoteCommitIds) {
             if (!expectedCommitIds.has(commitId)) {
                 const deleted = await this.webhookSender.deleteEventByIdentity(commitId, this.config.developerId, this.config.repositoryName);

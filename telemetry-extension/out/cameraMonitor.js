@@ -75,7 +75,8 @@ class CameraMonitor {
     getPythonCommandCandidates() {
         const config = vscode.workspace.getConfiguration('devintel');
         const configured = (config.get('pythonCommand', '') || '').trim();
-        const candidates = [configured, 'py', 'python', 'python3'].filter(Boolean);
+        const isWindows = process.platform === 'win32';
+        const candidates = [configured, isWindows ? 'python' : 'python3', 'python', 'py'].filter(Boolean);
         return [...new Set(candidates)];
     }
     runPythonScript(commands, scriptPath) {

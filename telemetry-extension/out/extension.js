@@ -23,7 +23,7 @@ async function activate(context) {
     const activityMonitor = new activityMonitor_1.ActivityMonitor(aggregator);
     activityMonitor.start();
     const cameraMonitor = new cameraMonitor_1.CameraMonitor(context.globalState);
-    const jiraPicker = new jiraPicker_1.JiraPicker();
+    const jiraPicker = new jiraPicker_1.JiraPicker(context);
     setTimeout(() => {
         jiraPicker.fetchAndPrompt();
     }, 1000); // Small delay to let git warm up

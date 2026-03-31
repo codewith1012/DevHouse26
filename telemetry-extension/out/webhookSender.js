@@ -45,6 +45,10 @@ class WebhookSender {
                 body: jsonBody
             });
             if (!response.ok) {
+                if (response.status === 409) {
+                    extension_1.logger.appendLine(`[INFO] Commit ${payload.commit_id} already exists in Supabase (409). Treating as synced.`);
+                    return true;
+                }
                 const errorText = await response.text();
                 extension_1.logger.appendLine(`[ERROR] Supabase send failed: ${response.status} ${response.statusText}`);
                 extension_1.logger.appendLine(`[DETAILS] ${errorText}`);
