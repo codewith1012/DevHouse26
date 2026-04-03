@@ -24,5 +24,5 @@ ENV PORT=8000
 # Make port 8000 available to the world outside this container
 EXPOSE 8000
 
-# Run the application using gunicorn with uvicorn workers for production
-CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "main:app", "--bind", "0.0.0.0:8000"]
+# Run the application using gunicorn with uvicorn workers for production. We use 1 worker to save RAM for the AI.
+CMD gunicorn -w 1 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:$PORT

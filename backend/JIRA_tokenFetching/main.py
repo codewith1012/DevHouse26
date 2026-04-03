@@ -25,17 +25,18 @@ app.include_router(jira.router)
 @app.on_event("startup")
 async def startup_event():
     """
-    Triggers JIRA sync automatically when the server starts.
+    Triggers JIRA sync.
+    We removed the bulk-sync on startup because downloading AI models + fetching whole
+    Jira boards blocks the fastAPI server and causes Render 502 Timeouts!
+    The webhook covers new tickets anyway.
     """
-    print("[INFO] Server starting... triggering JIRA sync.")
-    client = JiraClient()
-    # Running sync in a simple way for now. 
-    # For very large projects, this could be moved to a background task.
-    try:
-        count = client.sync_all_tickets()
-        print(f"[INFO] Startup sync complete. Synced {count} tickets.")
-    except Exception as e:
-        print(f"[ERROR] Startup sync failed: {e}")
+    print("[INFO] Server starting successfully...")
+    # client = JiraClient()
+    # try:
+    #     count = client.sync_all_tickets()
+    #     print(f"[INFO] Startup sync complete. Synced {count} tickets.")
+    # except Exception as e:
+    #     print(f"[ERROR] Startup sync failed: {e}")
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
