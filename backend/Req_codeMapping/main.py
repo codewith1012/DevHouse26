@@ -1,5 +1,4 @@
 import json
-import math
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -11,6 +10,14 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 
+from utils import (
+    cosine_similarity,
+    normalize_spaces,
+    build_commit_context,
+    re_rank_candidates,
+    calculate_heuristic_boost,
+    should_skip_commit,
+)
 import utils
 
 
@@ -26,7 +33,7 @@ SUPABASE_API_KEY = (
 BASE_REST_URL = f"{(SUPABASE_URL or '').rstrip('/')}/rest/v1"
 
 FASTEMBED_MODEL_NAME = os.getenv("REQ_MATCH_MODEL", "BAAI/bge-small-en-v1.5")
-MATCH_THRESHOLD = float(os.getenv("REQ_MATCH_THRESHOLD", "0.45"))
+MATCH_THRESHOLD = float(os.getenv("REQ_MATCH_THRESHOLD", "0.35"))
 AUTO_SYNC_ON_DASHBOARD = os.getenv("AUTO_SYNC_ON_DASHBOARD", "false").strip().lower() == "true"
 MAX_PATCH_CHARS = int(os.getenv("REQ_MATCH_MAX_PATCH_CHARS", "4000"))
 MAX_COMMIT_TEXT_CHARS = int(os.getenv("REQ_MATCH_MAX_COMMIT_TEXT_CHARS", "12000"))
@@ -44,6 +51,8 @@ app = FastAPI(title="Supabase Commit Sync API")
 
 @app.on_event("startup")
 async def startup_event():
+    print("[INFO] Service started. Triggering initial queue processing.")
+    asyncio.create_task(process_unmapped_queue())
     asyncio.create_task(fallback_loop())
 
 
@@ -51,7 +60,7 @@ async def fallback_loop():
     while True:
         try:
             print("[INFO] Running fallback queue check...")
-            process_unmapped_queue()
+            await process_unmapped_queue()
         except Exception as e:
             print(f"Fallback queue error: {e}")
         await asyncio.sleep(600)  # Wait 10 minutes between loops
@@ -102,18 +111,14 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return [[float(value) for value in vector.tolist()] for vector in embeddings]
 
 
-def cosine_similarity(left: list[float], right: list[float]) -> float:
-    numerator = sum(a * b for a, b in zip(left, right))
-    left_norm = math.sqrt(sum(a * a for a in left))
-    right_norm = math.sqrt(sum(b * b for b in right))
-    if left_norm == 0.0 or right_norm == 0.0:
-        return 0.0
-    return numerator / (left_norm * right_norm)
-
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "model": FASTEMBED_MODEL_NAME,
+        "match_threshold": MATCH_THRESHOLD,
+    }
 
 
 @app.get("/api/dashboard")
@@ -173,7 +178,17 @@ def extension_events_webhook(payload: dict[str, Any], bg_tasks: BackgroundTasks)
             return {"status": "queued_deletion", "commit_id": commit_id}
         return {"status": "ignored", "reason": "missing_commit_id_in_delete"}
 
-    # 2. For any insert/create, spin up the queue processor implicitly!
+    # 2. Extract commit_id to process immediately
+    try:
+        event = extract_event_from_payload(payload)
+        commit_id = str(event.get("commit_id") or "").strip()
+        if commit_id:
+            # Process this specific commit immediately
+            bg_tasks.add_task(process_single_commit, commit_id, event)
+    except Exception as e:
+        print(f"[INFO] Webhook payload missing explicit commit_id: {e}")
+
+    # Wake up the queue for any other pending ones
     bg_tasks.add_task(process_unmapped_queue)
     return {"status": "queued_processing"}
 
@@ -268,100 +283,141 @@ def sync_commit_links() -> dict[str, Any]:
     }
 
 
-def process_unmapped_queue() -> None:
-    """Pulls all unprocessed rows from extension_events and processes them sequentially."""
-    print("[INFO] Waking up background queue processor...")
+async def process_single_commit(commit_id: str, event: Optional[dict[str, Any]] = None) -> None:
+    """Async-friendly wrapper for processing a single commit."""
+    await asyncio.to_thread(_process_single_commit_sync, commit_id, event)
+
+
+def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] = None) -> None:
+    """Synchronous implementation to process a single commit and map it to a Jira requirement."""
+    print(f"[PROCESS] Starting commit {commit_id}")
     try:
-        # Fetch up to 50 unprocessed commits
-        unprocessed = request_json("GET", f"{BASE_REST_URL}/extension_events?processed=eq.false&limit=50")
-        if not isinstance(unprocessed, list) or len(unprocessed) == 0:
+        if not event:
+            events = request_json("GET", f"{BASE_REST_URL}/extension_events?commit_id=eq.{parse.quote(commit_id)}&processed=eq.false&limit=1")
+            if not events or len(events) == 0:
+                print(f"[INFO] Commit {commit_id} already processed or not found.")
+                return
+            event = events[0]
+
+        message = str(event.get("message") or "").strip().lower()
+
+        # Check 1: Ignore trivial or noise commits using shared helper
+        if should_skip_commit(message):
+            print(f"Skipped trivial commit: '{message}' ({commit_id})")
+            return  # Finally block will mark it processed
+
+        commit_context = build_commit_context(event)
+        if not commit_context:
+            print(f"Skipped empty commit: No file changes detected ({commit_id})")
+            return
+
+        # Step 2: Embed context — build_commit_context returns raw text WITHOUT prefix.
+        # We apply 'query: ' here at embed time for clean separation of concerns.
+        embeddings = embed_texts([f"query: {commit_context}"])
+        if not embeddings:
             return
             
-        print(f"[INFO] Found {len(unprocessed)} unprocessed commits.")
-        
-        for event in unprocessed:
-            commit_id = str(event.get("commit_id") or "").strip()
-            if not commit_id:
-                continue
-                
-            message = str(event.get("message") or "").strip().lower()
-            
-            # Check 1: Ignore trivial or noise commits
-            trivial_keywords = ["initial commit", "init", "wip", "update", "dummy", "test", "fix"]
-            if message in trivial_keywords or len(message) < 5:
-                mark_commit_processed(commit_id, store_embedding=False)
-                continue
+        commit_embedding = embeddings[0]
 
-            commit_context = utils.build_commit_context(event)
-            if not commit_context:
-                mark_commit_processed(commit_id, store_embedding=False)
-                continue
-
-            # Step 2: Embed context
-            embeddings = embed_texts([commit_context])
-            if not embeddings:
-                mark_commit_processed(commit_id, store_embedding=False)
-                continue
-                
-            commit_embedding = embeddings[0]
-            
-            # Step 3: IN PLACE UPDATE -> patch "extension_events"
-            try:
-                patch_row(
-                    "extension_events",
-                    f"commit_id=eq.{parse.quote(commit_id)}",
-                    {
-                        "embedding": commit_embedding,
-                        "embeddings_stored": True
-                    }
-                )
-            except Exception as e:
-                print(f"Failed to update embedding for {commit_id}: {e}")
-                continue
-
-            # Step 4: Call Supabase native similarity search RPC
-            candidates = request_json("POST", f"{BASE_REST_URL}/rpc/match_requirements", payload={
-                "query_embedding": commit_embedding,
-                "match_threshold": 0.35,
-                "match_count": 6
-            })
-
-            if not candidates:
-                mark_commit_processed(commit_id, store_embedding=True)
-                continue
-
-            # Step 5: Smart Re-ranking in Python
-            best_match = utils.re_rank_candidates(candidates, event)
-
-            if best_match and best_match.get("confidence", 0) >= 0.55:
-                issue_id = best_match["issue_id"]
-                
-                commit_payload = {
-                    "commit_id": commit_id,
-                    "message": event.get("message"),
-                    "timestamp": event.get("timestamp"),
-                    "author": event.get("author"),
-                    "confidence": round(best_match["confidence"], 4)
+        # Step 3: IN PLACE UPDATE -> patch "extension_events"
+        try:
+            patch_row(
+                "extension_events",
+                f"commit_id=eq.{parse.quote(commit_id)}",
+                {
+                    "embedding": commit_embedding,
+                    "embeddings_stored": True
                 }
-                
+            )
+        except Exception as e:
+            print(f"[ERROR] Failed to update embedding for {commit_id}: {e}")
+            return
+
+        # Step 4: Call Supabase native similarity search RPC
+        candidates = request_json("POST", f"{BASE_REST_URL}/rpc/match_requirements", payload={
+            "query_embedding": commit_embedding,
+            "match_threshold": float(MATCH_THRESHOLD),
+            "match_count": 6
+        })
+
+        if not candidates:
+            print(f"❌ No strong match found for {commit_id} (0 candidates)")
+            return
+
+        # Step 5: Smart Re-ranking in Python
+        best_match = re_rank_candidates(candidates, event)
+
+        if best_match and best_match.get("confidence", 0) >= 0.55:
+            issue_id = best_match["issue_id"]
+            
+            commit_payload = {
+                "commit_id": commit_id,
+                "message": event.get("message"),
+                "timestamp": event.get("timestamp"),
+                "author": event.get("author"),
+                "confidence": round(best_match["confidence"], 4)
+            }
+            
+            try:
                 request_json("POST", f"{BASE_REST_URL}/rpc/append_commit_to_requirement", payload={
                     "p_issue_id": issue_id,
                     "p_commit_data": commit_payload
                 })
-                
-            mark_commit_processed(commit_id, store_embedding=True)
+                print(f"✅ Successfully mapped to {issue_id} (Confidence: {best_match['confidence']:.2f})")
+            except Exception as e:
+                print(f"[ERROR] Failed to map commit {commit_id} to {issue_id}: {e}")
+        else:
+            best_conf = best_match.get('confidence', 0) if best_match else 0
+            print(f"❌ No strong match found for {commit_id} (Confidence: {best_conf:.2f})")
             
+    except Exception as e:
+        print(f"[ERROR] Exception processing commit {commit_id}: {e}")
+    finally:
+        # Always mark the commit as processed = true at the end (success or failure)
+        mark_commit_processed(commit_id)
+
+
+async def process_unmapped_queue() -> None:
+    """Pulls all unprocessed rows from extension_events and processes them sequentially via async wrapper."""
+    print("[INFO] Waking up background queue processor...")
+    try:
+        while True:
+            # Yield gracefully to the event loop so webhook is highly responsive
+            await asyncio.sleep(0.1)
+            
+            # Fetch up to 50 unprocessed commits across the thread pool
+            unprocessed = await asyncio.to_thread(request_json, "GET", f"{BASE_REST_URL}/extension_events?processed=eq.false&limit=50")
+            if not isinstance(unprocessed, list) or len(unprocessed) == 0:
+                print("[INFO] Queue is empty. All commits processed.")
+                break
+                
+            print(f"[INFO] Found {len(unprocessed)} unprocessed commits.")
+            
+            for event in unprocessed:
+                commit_id = str(event.get("commit_id") or "").strip()
+                if not commit_id:
+                    continue
+                    
+                # Explicitly await the single commit processing sequentially, yet completely async!
+                await process_single_commit(commit_id, event)
+
+            # Gentle backpressure — prevents hammering Supabase between batches
+            await asyncio.sleep(0.5)
+                
     except Exception as e:
         print(f"[ERROR] Queue processor failed: {e}")
 
 
-def mark_commit_processed(commit_id: str, store_embedding: bool = False) -> None:
+def mark_commit_processed(commit_id: str, store_embedding: Optional[bool] = None) -> None:
     """Marks a commit as safely completed so the loop won't pick it up again."""
     if not commit_id:
         return
     try:
         patch_query = f"commit_id=eq.{parse.quote(commit_id)}"
-        patch_row("extension_events", patch_query, {"processed": True, "embeddings_stored": store_embedding})
+        payload = {"processed": True}
+        if store_embedding is not None:
+            payload["embeddings_stored"] = store_embedding
+        patch_row("extension_events", patch_query, payload)
     except Exception as e:
         print(f"Failed to mark processed for {commit_id}: {e}")
 

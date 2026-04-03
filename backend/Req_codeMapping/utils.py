@@ -43,12 +43,18 @@ def extract_patch_summary(patch: str, max_hunks: int = 4) -> str:
 def build_commit_context(commit_data: Dict[str, Any]) -> str:
     """
     Builds a rich context string for the commit, combining message,
-    file paths, and a truncated patch summary. 
-    Notes: prepends 'query: ' since BAAI/bge-small uses asymmetric encoding.
+    file paths, and a truncated patch summary.
+
+    EMBEDDING PREFIX STRATEGY (BAAI/bge-small-en-v1.5 asymmetric encoding):
+      - Commits use 'query: ' prefix  → added at embed time in main.py
+      - Requirements use 'passage: ' prefix  → added at embed time in main.py
+    This function returns raw text WITHOUT any prefix for clean separation of concerns.
     """
     message = str(commit_data.get("message") or "").strip()
+    if not message:
+        message = "No commit message"
 
-    # Extract file paths safely
+    # Extract file paths safely from "files" or nested "files_json"
     files = []
     direct_files = commit_data.get("files")
     if isinstance(direct_files, list):
@@ -60,18 +66,36 @@ def build_commit_context(commit_data: Dict[str, Any]) -> str:
         elif isinstance(files_json, list):
             files = files_json
 
-    file_paths = [str(f.get("file_path", "")) for f in files if isinstance(f, dict) and "file_path" in f]
+    file_paths = [str(f.get("file_path", "")) for f in files if isinstance(f, dict) and f.get("file_path")]
 
     diff_patch = str(commit_data.get("diff_patch") or "")
     patch_summary = extract_patch_summary(diff_patch, max_hunks=4)
 
-    context = f"query: {message} "
-    if file_paths:
-        context += f"Files changed: {', '.join(file_paths)}. "
-    if patch_summary:
-        context += f"Patch: {patch_summary}"
+    # Build parts using pipe-delimited format for clarity
+    parts = [message]  # NO prefix here — caller applies 'query: ' at embed time
 
-    return normalize_spaces(context)
+    if file_paths:
+        parts.append(f"Changed files: {', '.join(file_paths[:8])}")  # cap at 8 files
+
+    if patch_summary:
+        parts.append(f"Code changes: {patch_summary}")
+
+    return normalize_spaces(" | ".join(parts))
+
+
+def should_skip_commit(message: str) -> bool:
+    """
+    Returns True if a commit message is too trivial to be worth embedding.
+    Uses substring matching so 'fix typo' or 'update readme' are caught too.
+    """
+    msg = message.lower().strip()
+    if len(msg) < 8:
+        return True
+    skip_keywords = {
+        "merge", "initial commit", "init", "wip", "update readme",
+        "bump version", "test", "fix typo", "dummy", "temp", "todo",
+    }
+    return any(kw in msg for kw in skip_keywords)
 
 
 def calculate_heuristic_boost(commit: Dict[str, Any], requirement: Dict[str, Any]) -> float:
@@ -94,28 +118,30 @@ def calculate_heuristic_boost(commit: Dict[str, Any], requirement: Dict[str, Any
 def re_rank_candidates(candidates: List[Dict[str, Any]], commit: Dict[str, Any], commit_embedding: List[float] = None) -> Dict[str, Any]:
     """
     Re-ranks a list of candidate requirements returned by the Supabase pgvector RPC.
-    Combines the semantic similarity score with heuristic boosts (Hybrid Search).
+    Uses adaptive weighted scoring:
+      - When a Jira ID match is detected: 65% semantic + 35% heuristic (heuristic is trustworthy)
+      - Otherwise: 75% semantic + 25% heuristic (semantics dominate)
     """
     if not candidates:
         return None
 
-    best_candidate = None
+    best = None
     highest_score = -1.0
 
     for req in candidates:
-        # Base semantic similarity from vector search
-        base_score = float(req.get("similarity", 0.0))
+        semantic_score = float(req.get("similarity", 0.0))
+        heuristic_boost = calculate_heuristic_boost(commit, req)
 
-        # Calculate heuristic boost (e.g. Jira issue ID in commit message)
-        boost = calculate_heuristic_boost(commit, req)
+        # Adaptive weights: trust heuristic more when Jira ID is explicitly mentioned
+        semantic_weight = 0.65 if heuristic_boost > 0 else 0.75
+        final_score = (semantic_score * semantic_weight) + (heuristic_boost * (1 - semantic_weight))
 
-        # Final combined confidence score
-        final_score = base_score + boost
-        req["confidence"] = final_score
-        req["re_rank_boost"] = boost
+        req["confidence"] = round(final_score, 4)
+        req["semantic_score"] = round(semantic_score, 4)
+        req["boost"] = round(heuristic_boost, 4)
 
         if final_score > highest_score:
             highest_score = final_score
-            best_candidate = req
+            best = req
 
-    return best_candidate
+    return best
