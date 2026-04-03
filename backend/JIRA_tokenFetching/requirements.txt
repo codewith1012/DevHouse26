@@ -5,3 +5,4 @@ supabase
 requests
 python-dotenv
 gunicorn
+fastembed

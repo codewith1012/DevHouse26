@@ -1,0 +1,6 @@
+# Local environment variables
+.env
+
+# Python artifacts
+__pycache__/
+*.py[cod]

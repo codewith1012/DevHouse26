@@ -4,6 +4,7 @@ from typing import List, Optional
 from datetime import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from fastembed import TextEmbedding
 
 load_dotenv()
 
@@ -19,6 +20,10 @@ class JiraClient:
         sb_url = os.getenv("SUPABASE_URL", "")
         sb_key = os.getenv("SUPABASE_SERVICE_KEY", "")
         self.supabase: Client = create_client(sb_url, sb_key)
+        
+        # Initialize the embedding model specifically for Jira tracking
+        print("[INFO] Loading BAAI/bge-small-en-v1.5 model...")
+        self.embed_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
     def parse_adf_to_text(self, adf: Optional[dict]) -> str:
         """Recursively parses Atlassian Document Format (ADF) to plain text."""
@@ -38,20 +43,36 @@ class JiraClient:
         return "".join(text_parts)
 
     def get_issue_data(self, issue: dict) -> dict:
-        """Extracts and formats relevant fields from a Jira issue JSON."""
+        """Extracts and formats relevant fields from a Jira issue JSON and computes its semantic vector."""
         fields = issue.get("fields", {})
+        
+        # Extract core text fields
+        title = fields.get("summary", "") or ""
+        description = self.parse_adf_to_text(fields.get("description")) or ""
+        issue_type = fields.get("issuetype", {}).get("name") or ""
+        priority = fields.get("priority", {}).get("name") or ""
+        
+        # Build the exact contextual paragraph expected by BAAI/bge-small-en-v1.5
+        passage_text = f"passage: {title} {description} {issue_type} {priority}"
+        cleaned_text = " ".join(passage_text.split())
+        
+        # Generate embedding vector
+        embeddings = list(self.embed_model.embed([cleaned_text]))
+        vector = [float(v) for v in embeddings[0].tolist()]
+
         return {
             "issue_id": issue.get("key"),
-            "title": fields.get("summary", ""),
-            "description": self.parse_adf_to_text(fields.get("description")),
+            "title": title,
+            "description": description,
             "status": fields.get("status", {}).get("name"),
-            "issue_type": fields.get("issuetype", {}).get("name"),
-            "priority": fields.get("priority", {}).get("name"),
+            "issue_type": issue_type,
+            "priority": priority,
             "project_key": fields.get("project", {}).get("key"),
             "assignee_email": fields.get("assignee", {}).get("emailAddress") if fields.get("assignee") else None,
             "reporter_email": fields.get("reporter", {}).get("emailAddress") if fields.get("reporter") else None,
             "jira_created_at": fields.get("created"),
-            "jira_updated_at": fields.get("updated")
+            "jira_updated_at": fields.get("updated"),
+            "req_embedding": vector
         }
 
     def upsert_to_supabase(self, records: List[dict]):

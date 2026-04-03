@@ -10,6 +10,9 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+import utils
+
+
 ROOT_DIR = Path(__file__).resolve().parent
 load_dotenv()
 
@@ -139,11 +142,43 @@ def match_commit_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
 @app.post("/api/extension-events/webhook")
 def extension_events_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     event_type = str(payload.get("type") or payload.get("eventType") or payload.get("event_type") or "").lower()
+    
+    # 1. Handle Deletions
+    if "delete" in event_type:
+        # Supabase stores deleted rows in 'old_record'
+        old_record = payload.get("old_record") or payload.get("record") or payload.get("data") or {}
+        commit_id = str(old_record.get("commit_id") or "").strip()
+        if not commit_id:
+            commit_id = str(payload.get("commit_id") or "").strip()
+            
+        if commit_id:
+            return process_commit_deletion(commit_id)
+        return {"status": "ignored", "reason": "missing_commit_id_in_delete"}
+
+    # 2. Handle Insertions
     if event_type and "insert" not in event_type and "create" not in event_type:
         return {"status": "ignored", "reason": f"unsupported_event_type:{event_type}"}
 
     event = extract_event_from_payload(payload)
     return process_single_commit_event(event)
+
+def process_commit_deletion(commit_id: str) -> dict[str, Any]:
+    """Handles the cascading deletion of a commit from embeddings and mapping tables."""
+    try:
+        # 1. Remove from vector embeddings table
+        delete_query = f"commit_id=eq.{parse.quote(commit_id)}"
+        request_json("DELETE", f"{BASE_REST_URL}/commit_embeddings?{delete_query}")
+        
+        # 2. Call our new RPC to safely pop it out of the JSONB array
+        request_json("POST", f"{BASE_REST_URL}/rpc/remove_commit_from_all_requirements", payload={
+            "p_commit_id": commit_id
+        })
+        
+        return {"status": "deleted", "commit_id": commit_id}
+    except Exception as e:
+        print(f"Error during deletion sync for {commit_id}: {e}")
+        # Not raising 500 so webhook doesn't spam retry, just returning
+        return {"status": "error", "commit_id": commit_id, "detail": str(e)}
 
 
 def sync_commit_links() -> dict[str, Any]:
@@ -227,33 +262,104 @@ def process_single_commit_event(event: dict[str, Any]) -> dict[str, Any]:
     if not commit_id:
         raise HTTPException(status_code=400, detail="Missing commit_id in payload")
 
-    issues = fetch_issues()
-    commit_text = build_commit_text(event)
-    if not commit_text:
-        return {
-            "status": "ignored",
-            "reason": "empty_commit_text",
-            "commit_id": commit_id,
-        }
+    message = str(event.get("message") or "").strip().lower()
+    
+    # Check 1: Ignore trivial or noise commits
+    trivial_keywords = ["initial commit", "init", "wip", "update", "dummy", "test", "fix"]
+    if message in trivial_keywords or len(message) < 5:
+        mark_commit_processed(commit_id)
+        return {"status": "ignored", "reason": "trivial_commit", "commit_id": commit_id}
 
-    matches = match_commit_rows([{"commit_id": commit_id, "text": commit_text}], issues)
-    match = matches[0] if matches else None
-    update_commit_mapping(commit_id, match, issues)
+    commit_context = utils.build_commit_context(event)
+    if not commit_context:
+        mark_commit_processed(commit_id)
+        return {"status": "ignored", "reason": "empty_commit_text", "commit_id": commit_id}
 
-    if not match:
-        return {
-            "status": "unmapped",
-            "commit_id": commit_id,
-            "threshold": MATCH_THRESHOLD,
-        }
+    try:
+        # Step 3: Embed context
+        embeddings = embed_texts([commit_context])
+        if not embeddings:
+            mark_commit_processed(commit_id)
+            return {"status": "error", "reason": "embedding_failed"}
 
-    return {
-        "status": "mapped",
-        "commit_id": commit_id,
-        "issue_id": match["issue_id"],
-        "score": round(float(match["score"]), 4),
-        "threshold": MATCH_THRESHOLD,
-    }
+        commit_embedding = embeddings[0]
+
+        # Step 4: Insert into commit_embeddings table
+        try:
+            patch_summary = utils.extract_patch_summary(str(event.get("diff_patch") or ""))
+            table_payload = {
+                "commit_id": commit_id,
+                "repository_name": str(event.get("repository_name") or "unknown"),
+                "commit_message": str(event.get("message") or ""),
+                "patch_summary": patch_summary,
+                "embedding": commit_embedding
+            }
+            request_json("POST", f"{BASE_REST_URL}/commit_embeddings", payload=table_payload)
+        except HTTPException as e:
+            # Ignore if commit already exists in table
+            if "duplicate" not in str(e.detail).lower() and "already exists" not in str(e.detail).lower():
+                print(f"Failed to insert commit_embeddings: {e.detail}")
+
+        # Step 5: Call Supabase native similarity search RPC
+        candidates = request_json("POST", f"{BASE_REST_URL}/rpc/match_requirements", payload={
+            "query_embedding": commit_embedding,
+            "match_threshold": 0.35,  # Slightly lower threshold since re-ranking boosts it
+            "match_count": 6
+        })
+
+        if not candidates:
+            mark_commit_processed(commit_id)
+            return {"status": "unmapped", "commit_id": commit_id, "reason": "no_candidates"}
+
+        # Step 6: Smart Re-ranking in Python (Combines Vector + Heuristics)
+        best_match = utils.re_rank_candidates(candidates, event)
+
+        # Step 7: Apply mapping if confidence is good (Restricts exactly 1 commit to 1 issue)
+        if best_match and best_match.get("confidence", 0) >= 0.55:
+            issue_id = best_match["issue_id"]
+            
+            # The JSON payload we want to physically embed inside the Jira Ticket's `commits` array
+            commit_payload = {
+                "commit_id": commit_id,
+                "message": event.get("message"),
+                "timestamp": event.get("timestamp"),
+                "author": event.get("author"),
+                "confidence": round(best_match["confidence"], 4)
+            }
+            
+            # Call our safe array appender
+            request_json("POST", f"{BASE_REST_URL}/rpc/append_commit_to_requirement", payload={
+                "p_issue_id": issue_id,
+                "p_commit_data": commit_payload
+            })
+            
+            mark_commit_processed(commit_id)
+            return {
+                "status": "mapped",
+                "commit_id": commit_id,
+                "issue_id": issue_id,
+                "confidence": commit_payload["confidence"]
+            }
+
+        # No candidate met the 0.55 threshold
+        mark_commit_processed(commit_id)
+        return {"status": "unmapped", "commit_id": commit_id, "reason": "low_confidence"}
+
+    except Exception as e:
+        print(f"Error processing {commit_id}: {e}")
+        mark_commit_processed(commit_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def mark_commit_processed(commit_id: str) -> None:
+    """Fallback: Always mark processed so webhooks don't infinitely retry broken commits."""
+    if not commit_id:
+        return
+    try:
+        patch_query = f"commit_id=eq.{parse.quote(commit_id)}"
+        patch_row("extension_events", patch_query, {"processed": True})
+    except Exception as e:
+        print(f"Failed to mark processed for {commit_id}: {e}")
 
 
 def fetch_issues() -> list[dict[str, Any]]:
