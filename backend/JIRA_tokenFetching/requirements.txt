@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+supabase
+requests
+python-dotenv
+gunicorn
+fastembed

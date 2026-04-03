@@ -1,0 +1,79 @@
+{
+  "name": "developer-intelligence",
+  "displayName": "DevHouse Telemetry",
+  "description": "Smart Git Commit Tracking for Supabase",
+  "version": "0.0.1",
+  "publisher": "devhouse",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "devhouse.selectJiraIssue",
+        "title": "DevHouse: Select Active Jira Issue"
+      },
+      {
+        "command": "devintel.sendTestPing",
+        "title": "DevIntel: Show Current Session Telemetry"
+      },
+      {
+        "command": "devintel.runPresenceCheck",
+        "title": "DevIntel: Run Presence Check"
+      }
+    ],
+    "configuration": {
+      "title": "Developer Intelligence Telemetry",
+      "properties": {
+        "devintel.supabaseUrl": {
+            "type": "string",
+            "default": "https://sgszqmuqwjghogtfuhbq.supabase.co",
+            "description": "Supabase Project URL"
+        },
+        "devintel.supabaseKey": {
+            "type": "string",
+            "default": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNnc3pxbXVxd2pnaG9ndGZ1aGJxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5MjE3MDIsImV4cCI6MjA4OTQ5NzcwMn0.kZbXvIIRnMq6gdWrowF9MKOkEgFCHlkuNaf6kT-QaSM",
+            "description": "Supabase Anon/Public Key"
+        },
+        "devintel.developerId": {
+          "type": "string",
+          "default": "dev_22",
+          "description": "Unique ID for telemetry. Defaults to your OS username if left as 'dev_22'."
+        },
+        "devintel.repositoryName": {
+          "type": "string",
+          "default": "payment-service",
+          "description": "Name of the current repository."
+        },
+        "devintel.telemetryEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable sending telemetry events."
+        },
+        "devintel.pythonCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Python launcher for face detection, for example 'py' or 'python'."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint"
+  },
+  "devDependencies": {
+    "@types/node": "18.x",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.1.3"
+  }
+}
