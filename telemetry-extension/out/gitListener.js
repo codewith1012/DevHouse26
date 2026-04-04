@@ -39,11 +39,12 @@ class GitListener {
         this.config = {
             supabaseUrl: config.get('supabaseUrl', 'https://sgszqmuqwjghogtfuhbq.supabase.co'),
             supabaseKey: config.get('supabaseKey', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNnc3pxbXVxd2pnaG9ndGZ1aGJxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5MjE3MDIsImV4cCI6MjA4OTQ5NzcwMn0.kZbXvIIRnMq6gdWrowF9MKOkEgFCHlkuNaf6kT-QaSM'),
+            estimateEngineUrl: config.get('estimateEngineUrl', 'http://127.0.0.1:8000'),
             developerId: developerId,
             repositoryName: config.get('repositoryName', 'payment-service'),
             telemetryEnabled: config.get('telemetryEnabled', true)
         };
-        this.webhookSender.updateConfig(this.config.supabaseUrl, this.config.supabaseKey);
+        this.webhookSender.updateConfig(this.config.supabaseUrl, this.config.supabaseKey, this.config.estimateEngineUrl);
     }
     async initialize() {
         const gitExtension = vscode.extensions.getExtension('vscode.git');
@@ -245,9 +246,13 @@ class GitListener {
                 extension_1.logger.appendLine(`[DEBUG] Final Payload Object to WebhookSender: ${JSON.stringify(supabaseEvent)}`);
                 // Send to Supabase
                 const success = await this.webhookSender.sendToSupabase(supabaseEvent);
+                const estimateSent = await this.webhookSender.sendToEstimateEngine(supabaseEvent);
                 if (success && filePath) {
                     this.moveToSynced(filePath);
                     await this.reconcileSupabaseWithLocalMirror(repoPath);
+                }
+                if (!estimateSent) {
+                    extension_1.logger.appendLine(`[WARN] Estimate Engine did not accept commit ${currentCommitId.substring(0, 7)}.`);
                 }
                 // Reset for the next session
                 this.aggregator.resetSession();

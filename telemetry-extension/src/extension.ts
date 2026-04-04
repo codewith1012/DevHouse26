@@ -18,8 +18,9 @@ export async function activate(context: vscode.ExtensionContext) {
     const config = vscode.workspace.getConfiguration('devintel');
     const supabaseUrl = config.get<string>('supabaseUrl', 'https://sgszqmuqwjghogtfuhbq.supabase.co');
     const supabaseKey = config.get<string>('supabaseKey', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNnc3pxbXVxd2pnaG9ndGZ1aGJxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5MjE3MDIsImV4cCI6MjA4OTQ5NzcwMn0.kZbXvIIRnMq6gdWrowF9MKOkEgFCHlkuNaf6kT-QaSM');
+    const estimateEngineUrl = config.get<string>('estimateEngineUrl', 'http://127.0.0.1:8000');
     
-    const webhookSender = new WebhookSender(supabaseUrl, supabaseKey);
+    const webhookSender = new WebhookSender(supabaseUrl, supabaseKey, estimateEngineUrl);
     
     const activityMonitor = new ActivityMonitor(aggregator);
     activityMonitor.start();

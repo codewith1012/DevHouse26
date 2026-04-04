@@ -78,6 +78,7 @@ export interface SupaBaseEvent {
 export interface ExtensionConfig {
     supabaseUrl: string;
     supabaseKey: string;
+    estimateEngineUrl: string;
     developerId: string;
     repositoryName: string;
     telemetryEnabled: boolean;

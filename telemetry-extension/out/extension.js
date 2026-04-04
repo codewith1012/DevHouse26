@@ -19,7 +19,8 @@ async function activate(context) {
     const config = vscode.workspace.getConfiguration('devintel');
     const supabaseUrl = config.get('supabaseUrl', 'https://sgszqmuqwjghogtfuhbq.supabase.co');
     const supabaseKey = config.get('supabaseKey', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNnc3pxbXVxd2pnaG9ndGZ1aGJxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5MjE3MDIsImV4cCI6MjA4OTQ5NzcwMn0.kZbXvIIRnMq6gdWrowF9MKOkEgFCHlkuNaf6kT-QaSM');
-    const webhookSender = new webhookSender_1.WebhookSender(supabaseUrl, supabaseKey);
+    const estimateEngineUrl = config.get('estimateEngineUrl', 'http://127.0.0.1:8000');
+    const webhookSender = new webhookSender_1.WebhookSender(supabaseUrl, supabaseKey, estimateEngineUrl);
     const activityMonitor = new activityMonitor_1.ActivityMonitor(aggregator);
     activityMonitor.start();
     const cameraMonitor = new cameraMonitor_1.CameraMonitor(context.globalState);

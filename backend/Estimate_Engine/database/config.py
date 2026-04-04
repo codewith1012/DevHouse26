@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     supabase_anon_key: str = ""
     supabase_service_key: str = ""
     supabase_table: str = "req_code_mapping"
+    extension_events_table: str = "extension_events"
+    extension_poll_enabled: bool = False
+    extension_poll_interval_seconds: int = 30
+    extension_poll_batch_size: int = 20
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

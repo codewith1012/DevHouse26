@@ -5,13 +5,16 @@ const extension_1 = require("./extension");
 class WebhookSender {
     supabaseUrl;
     supabaseKey;
-    constructor(supabaseUrl = '', supabaseKey = '') {
+    estimateEngineUrl;
+    constructor(supabaseUrl = '', supabaseKey = '', estimateEngineUrl = '') {
         this.supabaseUrl = supabaseUrl;
         this.supabaseKey = supabaseKey;
+        this.estimateEngineUrl = estimateEngineUrl;
     }
-    updateConfig(supabaseUrl, supabaseKey) {
+    updateConfig(supabaseUrl, supabaseKey, estimateEngineUrl = '') {
         this.supabaseUrl = supabaseUrl;
         this.supabaseKey = supabaseKey;
+        this.estimateEngineUrl = estimateEngineUrl;
     }
     getBaseUrl() {
         return `${this.supabaseUrl.replace(/\/$/, '')}/rest/v1/extension_events`;
@@ -59,6 +62,34 @@ class WebhookSender {
         }
         catch (error) {
             extension_1.logger.appendLine(`[ERROR] Exception sending to Supabase: ${error}`);
+            return false;
+        }
+    }
+    async sendToEstimateEngine(payload) {
+        if (!this.estimateEngineUrl) {
+            extension_1.logger.appendLine("[WARN] Estimate Engine URL not configured. Skipping estimate engine send.");
+            return false;
+        }
+        const url = `${this.estimateEngineUrl.replace(/\/$/, '')}/signals/extension`;
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+            if (!response.ok) {
+                const errorText = await response.text();
+                extension_1.logger.appendLine(`[ERROR] Estimate Engine send failed: ${response.status} ${response.statusText}`);
+                extension_1.logger.appendLine(`[DETAILS] ${errorText}`);
+                return false;
+            }
+            extension_1.logger.appendLine(`[SUCCESS] Telemetry sent to Estimate Engine endpoint '${url}'`);
+            return true;
+        }
+        catch (error) {
+            extension_1.logger.appendLine(`[ERROR] Exception sending to Estimate Engine: ${error}`);
             return false;
         }
     }

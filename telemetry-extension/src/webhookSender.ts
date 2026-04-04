@@ -4,15 +4,18 @@ import { logger } from './extension';
 export class WebhookSender {
     private supabaseUrl: string;
     private supabaseKey: string;
+    private estimateEngineUrl: string;
 
-    constructor(supabaseUrl: string = '', supabaseKey: string = '') {
+    constructor(supabaseUrl: string = '', supabaseKey: string = '', estimateEngineUrl: string = '') {
         this.supabaseUrl = supabaseUrl;
         this.supabaseKey = supabaseKey;
+        this.estimateEngineUrl = estimateEngineUrl;
     }
 
-    public updateConfig(supabaseUrl: string, supabaseKey: string): void {
+    public updateConfig(supabaseUrl: string, supabaseKey: string, estimateEngineUrl: string = ''): void {
         this.supabaseUrl = supabaseUrl;
         this.supabaseKey = supabaseKey;
+        this.estimateEngineUrl = estimateEngineUrl;
     }
 
     private getBaseUrl(): string {
@@ -67,6 +70,37 @@ export class WebhookSender {
             return true;
         } catch (error) {
             logger.appendLine(`[ERROR] Exception sending to Supabase: ${error}`);
+            return false;
+        }
+    }
+
+    public async sendToEstimateEngine(payload: SupaBaseEvent): Promise<boolean> {
+        if (!this.estimateEngineUrl) {
+            logger.appendLine("[WARN] Estimate Engine URL not configured. Skipping estimate engine send.");
+            return false;
+        }
+
+        const url = `${this.estimateEngineUrl.replace(/\/$/, '')}/signals/extension`;
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                logger.appendLine(`[ERROR] Estimate Engine send failed: ${response.status} ${response.statusText}`);
+                logger.appendLine(`[DETAILS] ${errorText}`);
+                return false;
+            }
+
+            logger.appendLine(`[SUCCESS] Telemetry sent to Estimate Engine endpoint '${url}'`);
+            return true;
+        } catch (error) {
+            logger.appendLine(`[ERROR] Exception sending to Estimate Engine: ${error}`);
             return false;
         }
     }
