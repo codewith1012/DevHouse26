@@ -1104,7 +1104,9 @@ function RiskPage() {
   const gridReveal = useRevealOnView();
   const [riskRows, setRiskRows] = useState([]);
   const [selectedRisk, setSelectedRisk] = useState(null);
+  const [issueInput, setIssueInput] = useState("");
   const [loading, setLoading] = useState(true);
+  const [lookupLoading, setLookupLoading] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -1132,6 +1134,29 @@ function RiskPage() {
       active = false;
     };
   }, []);
+
+  async function fetchSingleRequirementRisk(issueId) {
+    const normalized = issueId.trim().toUpperCase();
+    if (!normalized) return;
+
+    setLookupLoading(true);
+    setError("");
+    try {
+      const response = await fetch(`${RISK_API_BASE_URL}/api/risk/requirement/${encodeURIComponent(normalized)}`);
+      if (!response.ok) throw new Error(`Risk engine request failed with ${response.status}`);
+      const payload = await response.json();
+      setSelectedRisk(payload);
+      setRiskRows((current) => {
+        const existing = current.filter((item) => item.requirement_id !== payload.requirement_id);
+        return [payload, ...existing];
+      });
+      setIssueInput(normalized);
+    } catch (fetchError) {
+      setError(fetchError.message || "Failed to load selected requirement risk");
+    } finally {
+      setLookupLoading(false);
+    }
+  }
 
   const highRiskCount = riskRows.filter((item) => item.risk_level === "HIGH").length;
   const mediumRiskCount = riskRows.filter((item) => item.risk_level === "MEDIUM").length;
@@ -1168,6 +1193,28 @@ function RiskPage() {
           <p className="hero-text narrow">
             This page turns live requirement activity into a clean risk review for managers: what is at risk, why it is at risk, and what the team should do next.
           </p>
+          <div className="risk-lookup-card">
+            <p className="eyebrow" style={{ margin: 0 }}>Requirement Lookup</p>
+            <div className="risk-lookup-row">
+              <input
+                className="risk-lookup-input"
+                placeholder="Enter issue ID, for example KAN-19"
+                value={issueInput}
+                onChange={(event) => setIssueInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") fetchSingleRequirementRisk(issueInput);
+                }}
+              />
+              <button
+                type="button"
+                className="button primary"
+                onClick={() => fetchSingleRequirementRisk(issueInput)}
+                disabled={lookupLoading}
+              >
+                {lookupLoading ? "Loading..." : "Load Requirement"}
+              </button>
+            </div>
+          </div>
         </div>
         <div className="glass-card dashboard-float reveal-card is-visible" style={{ padding: "22px", display: "grid", gap: "14px" }}>
           <p className="eyebrow" style={{ margin: 0 }}>Live portfolio view</p>

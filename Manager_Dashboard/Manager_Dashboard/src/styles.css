@@ -1703,6 +1703,35 @@ td {
   gap: 14px;
 }
 
+.risk-lookup-card {
+  display: grid;
+  gap: 12px;
+  margin-top: 22px;
+  max-width: 540px;
+  padding: 18px 20px;
+  border-radius: 22px;
+  border: 1px solid rgba(17, 17, 17, 0.08);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.05);
+}
+
+.risk-lookup-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.risk-lookup-input {
+  flex: 1 1 220px;
+  min-height: 48px;
+  padding: 0 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(17, 17, 17, 0.12);
+  background: rgba(255, 255, 255, 0.98);
+  color: #111111;
+  outline: none;
+}
+
 .prediction-metric,
 .action-card,
 .simulation-results > div {
