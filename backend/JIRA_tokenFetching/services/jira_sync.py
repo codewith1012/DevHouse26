@@ -85,7 +85,7 @@ class JiraClient:
     def generate_req_embedding(self, text: str) -> list[float]:
         """
         Generates a resilient vector(384) embedding payload for Supabase.
-        Returns [] on failure so callers can omit req_embedding when needed.
+        Returns [] on failure so callers can omit embedding when needed.
         """
         issue_id = self._current_issue_id or "unknown"
         try:
@@ -137,7 +137,7 @@ class JiraClient:
         }
         if vector:
             # Must be a JSON list of floats so Supabase stores vector(384) correctly.
-            record["req_embedding"] = vector
+            record["embedding"] = vector
         return record
 
     def upsert_to_supabase(self, records: List[dict]):
@@ -153,7 +153,7 @@ class JiraClient:
             ).execute()
             for record in records:
                 issue_id = record.get("issue_id")
-                vector = record.get("req_embedding")
+                vector = record.get("embedding")
                 vector_state = len(vector) if isinstance(vector, list) else "NULL"
                 print(f"[INFO] Upserted {issue_id} with embedding: {vector_state}")
         except Exception as e:
@@ -224,6 +224,31 @@ class JiraClient:
             raise RuntimeError(f"Jira API failed with status {response.status_code}")
         return response.json()
 
+    def fetch_issue_by_key(self, issue_key: str) -> Optional[dict]:
+        """Fetches a full Jira issue payload by key for webhook events with partial body."""
+        if not issue_key:
+            return None
+
+        fields = [
+            "summary",
+            "description",
+            "status",
+            "issuetype",
+            "priority",
+            "project",
+            "assignee",
+            "reporter",
+            "created",
+            "updated",
+        ]
+        params = ",".join(fields)
+        issue_url = f"{self.url}/rest/api/3/issue/{issue_key}?fields={params}"
+        response = requests.get(issue_url, auth=self.auth, timeout=60)
+        if response.status_code != 200:
+            print(f"[ERROR] Failed to fetch issue {issue_key} from Jira: {response.status_code} {response.text}")
+            return None
+        return response.json()
+
     def sync_all_tickets(self) -> int:
         """Fetches all tickets from the defined Jira project and syncs them to Supabase."""
         synced_count = 0
@@ -279,8 +304,8 @@ class JiraClient:
         max_batches: int = 20,
     ) -> int:
         """
-        Backfills Jira requirement embeddings for rows missing either embedding column.
-        Uses existing req_code_mapping fields and stores into both embedding columns.
+        Backfills Jira requirement embeddings for rows missing embedding.
+        Uses existing req_code_mapping fields and stores into embedding column.
         """
         print("[JIRA] Startup requirement embedding backfill started...")
         total_processed = 0
@@ -292,7 +317,7 @@ class JiraClient:
             try:
                 response = (
                     self.supabase.table("req_code_mapping")
-                    .select("issue_id,title,description,issue_type,priority,embedding,req_embedding")
+                    .select("issue_id,title,description,issue_type,priority,embedding")
                     .range(offset, offset + batch_size - 1)
                     .execute()
                 )
@@ -310,8 +335,7 @@ class JiraClient:
                     continue
 
                 has_embedding = isinstance(row.get("embedding"), list) and len(row["embedding"]) > 0
-                has_req_embedding = isinstance(row.get("req_embedding"), list) and len(row["req_embedding"]) > 0
-                if has_embedding and has_req_embedding:
+                if has_embedding:
                     continue
 
                 text = self._build_embedding_text(
@@ -328,7 +352,7 @@ class JiraClient:
                 try:
                     (
                         self.supabase.table("req_code_mapping")
-                        .update({"embedding": vector, "req_embedding": vector})
+                        .update({"embedding": vector})
                         .eq("issue_id", issue_id)
                         .execute()
                     )

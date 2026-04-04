@@ -50,9 +50,9 @@ def main():
     # This will download the model weights to a cache folder usually on first run
     model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
-    # Fetch rows where req_embedding is null
+    # Fetch rows where embedding is null
     print("Fetching Jira requirements with NULL embeddings...")
-    query = "select=issue_id,title,description,issue_type,priority&req_embedding=is.null"
+    query = "select=issue_id,title,description,issue_type,priority&embedding=is.null"
     url = f"{BASE_REST_URL}/req_code_mapping?{query}"
 
     rows = request_json("GET", url)
@@ -86,7 +86,7 @@ def main():
         patch_query = f"issue_id=eq.{parse.quote(issue_id)}"
         patch_url = f"{BASE_REST_URL}/req_code_mapping?{patch_query}"
 
-        request_json("PATCH", patch_url, payload={"req_embedding": vector})
+        request_json("PATCH", patch_url, payload={"embedding": vector})
         print(f"Successfully updated {issue_id}")
 
     print("--- BACKFILL COMPLETE ---")

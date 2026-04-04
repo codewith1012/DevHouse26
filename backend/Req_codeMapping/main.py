@@ -157,7 +157,7 @@ def health() -> dict[str, Any]:
     requirements_without_embeddings = count_rows(
         "req_code_mapping",
         "issue_id",
-        "req_embedding=is.null",
+        "embedding=is.null",
     )
     unmapped_commits = count_rows(
         "extension_events",
@@ -326,7 +326,7 @@ def build_jira_record(issue: dict[str, Any]) -> dict[str, Any]:
         "jira_updated_at": fields.get("updated"),
     }
     if embedding:
-        record["req_embedding"] = embedding
+        record["embedding"] = embedding
     return record
 
 
@@ -365,12 +365,12 @@ def process_jira_issue_delete(issue_id: str) -> None:
 
 
 def fetch_requirements_missing_embeddings(limit: int = 50) -> list[dict[str, Any]]:
-    base_select = "issue_id,title,description,status,issue_type,priority,jira_updated_at,req_embedding"
+    base_select = "issue_id,title,description,status,issue_type,priority,jira_updated_at,embedding"
 
     # Try flexible filter first for schemas that include embeddings_stored.
     query_with_flag = (
         f"select={base_select}"
-        "&or=(req_embedding.is.null,embeddings_stored.eq.false)"
+        "&or=(embedding.is.null,embeddings_stored.eq.false)"
         "&order=jira_updated_at.asc"
         f"&limit={limit}"
     )
@@ -383,7 +383,7 @@ def fetch_requirements_missing_embeddings(limit: int = 50) -> list[dict[str, Any
 
     params = {
         "select": base_select,
-        "req_embedding": "is.null",
+        "embedding": "is.null",
         "order": "jira_updated_at.asc",
         "limit": str(limit),
     }
@@ -418,7 +418,7 @@ def embed_missing_requirements(batch_size: int = 25, max_batches: int = 20) -> i
                 patch_row(
                     "req_code_mapping",
                     f"issue_id=eq.{parse.quote(issue_id)}",
-                    {"req_embedding": vectors[0]},
+                    {"embedding": vectors[0]},
                 )
                 processed += 1
                 APP_STATE["last_issue_id"] = issue_id
@@ -590,7 +590,7 @@ def _fallback_match_requirements(commit_embedding: list[float]) -> list[dict[str
     try:
         issues = get_rows(
             "req_code_mapping",
-            "issue_id,title,description,req_embedding",
+            "issue_id,title,description,embedding",
             order="jira_updated_at.asc",
             limit=500,
         )
@@ -600,7 +600,7 @@ def _fallback_match_requirements(commit_embedding: list[float]) -> list[dict[str
 
     candidates: list[dict[str, Any]] = []
     for issue in issues:
-        raw_embedding = issue.get("req_embedding")
+        raw_embedding = issue.get("embedding")
         if not raw_embedding or not isinstance(raw_embedding, list):
             continue
         try:

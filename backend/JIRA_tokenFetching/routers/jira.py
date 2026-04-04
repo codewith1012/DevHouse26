@@ -21,10 +21,21 @@ def _process_webhook_upsert(payload: dict) -> None:
     try:
         print("[WEBHOOK] Starting upsert task")
         client = get_jira_client()
-        issue = payload.get("issue")
-        if not issue:
-            print("[WARN] Jira webhook upsert skipped: no issue in payload")
+        issue = payload.get("issue") or {}
+        issue_id = _extract_issue_id(payload)
+
+        if not issue and not issue_id:
+            print("[WARN] Jira webhook upsert skipped: no issue payload and no issue_id")
             return
+
+        # Some Jira webhook configs send partial issue objects. Fetch full issue when needed.
+        if issue_id and (not issue.get("fields") or not issue.get("key")):
+            fetched_issue = client.fetch_issue_by_key(issue_id)
+            if fetched_issue:
+                issue = fetched_issue
+
+        if issue_id and not issue.get("key"):
+            issue["key"] = issue_id
 
         record = client.get_issue_data(issue)
         if not record.get("issue_id"):
@@ -92,7 +103,7 @@ def bulk_sync_jira_tickets(client: JiraClient = Depends(get_jira_client)):
 
 @router.get("/jira/verify-embeddings")
 def verify_embeddings(client: JiraClient = Depends(get_jira_client)):
-    """Returns total row count and how many rows still have NULL embedding columns."""
+    """Returns total row count and how many rows still have NULL embedding."""
     try:
         total_response = (
             client.supabase.table("req_code_mapping")
@@ -105,22 +116,14 @@ def verify_embeddings(client: JiraClient = Depends(get_jira_client)):
             .is_("embedding", "null")
             .execute()
         )
-        null_req_embedding_response = (
-            client.supabase.table("req_code_mapping")
-            .select("issue_id", count="exact", head=True)
-            .is_("req_embedding", "null")
-            .execute()
-        )
 
         total = int(total_response.count or 0)
         null_embedding = int(null_embedding_response.count or 0)
-        null_req_embedding = int(null_req_embedding_response.count or 0)
         return {
             "status": "ok",
             "total_rows": total,
             "null_embedding_rows": null_embedding,
-            "null_req_embedding_rows": null_req_embedding,
-            "rows_with_both_embeddings": max(total - max(null_embedding, null_req_embedding), 0),
+            "non_null_embedding_rows": max(total - null_embedding, 0),
         }
     except Exception as exc:
         print(f"[ERROR] Embedding verification failed: {exc}")

@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS req_code_mapping (
   reporter_email  VARCHAR(255),
   jira_created_at TIMESTAMPTZ,
   jira_updated_at TIMESTAMPTZ,
-  req_embedding   vector(384) NULL,
+  embedding       vector(384) NULL,
 
   -- List of commit_hashes linked to this requirement
   commits         JSONB         NOT NULL DEFAULT '[]'::JSONB,
@@ -26,13 +26,13 @@ CREATE TABLE IF NOT EXISTS req_code_mapping (
 );
 
 ALTER TABLE req_code_mapping
-  ADD COLUMN IF NOT EXISTS req_embedding vector(384);
+  ADD COLUMN IF NOT EXISTS embedding vector(384);
 
 CREATE INDEX IF NOT EXISTS idx_rcm_status   ON req_code_mapping (status);
 CREATE INDEX IF NOT EXISTS idx_rcm_project  ON req_code_mapping (project_key);
 CREATE INDEX IF NOT EXISTS idx_rcm_commits_gin ON req_code_mapping USING GIN (commits);
 CREATE INDEX IF NOT EXISTS idx_req_embedding
-  ON req_code_mapping USING ivfflat (req_embedding vector_cosine_ops);
+  ON req_code_mapping USING ivfflat (embedding vector_cosine_ops);
 
 -- Auto-update updated_at
 CREATE OR REPLACE FUNCTION update_rcm_updated_at()
