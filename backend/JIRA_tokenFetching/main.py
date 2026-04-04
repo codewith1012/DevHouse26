@@ -1,7 +1,8 @@
 from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from routers import jira
-from services.jira_sync import JiraClient
+from services.jira_sync import get_jira_client
+import asyncio
 import uvicorn
 import os
 from dotenv import load_dotenv
@@ -22,6 +23,14 @@ app.add_middleware(
 # Register routers
 app.include_router(jira.router)
 
+
+async def run_startup_backfill() -> None:
+    try:
+        client = get_jira_client()
+        await asyncio.to_thread(client.backfill_missing_requirement_embeddings)
+    except Exception as exc:
+        print(f"[ERROR] Startup Jira embedding backfill failed: {exc}")
+
 @app.on_event("startup")
 async def startup_event():
     """
@@ -31,6 +40,12 @@ async def startup_event():
     The webhook covers new tickets anyway.
     """
     print("[INFO] Server starting successfully...")
+    try:
+        get_jira_client()
+        print("[INFO] Jira client + embedding model are warm.")
+        asyncio.create_task(run_startup_backfill())
+    except Exception as exc:
+        print(f"[ERROR] Failed to warm Jira client/model: {exc}")
     # client = JiraClient()
     # try:
     #     count = client.sync_all_tickets()

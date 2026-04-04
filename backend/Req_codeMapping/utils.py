@@ -1,5 +1,5 @@
 import math
-from typing import Any, List, Dict
+from typing import Any, Dict, List, Optional
 
 
 def cosine_similarity(left: List[float], right: List[float]) -> float:
@@ -83,7 +83,7 @@ def build_commit_context(commit_data: Dict[str, Any]) -> str:
     return normalize_spaces(" | ".join(parts))
 
 
-def should_skip_commit(message: str) -> bool:
+def should_skip_commit(message: str, commit_data: Optional[Dict[str, Any]] = None) -> bool:
     """
     Returns True if a commit message is too trivial to be worth embedding.
     Uses substring matching so 'fix typo' or 'update readme' are caught too.
@@ -95,7 +95,31 @@ def should_skip_commit(message: str) -> bool:
         "merge", "initial commit", "init", "wip", "update readme",
         "bump version", "test", "fix typo", "dummy", "temp", "todo",
     }
-    return any(kw in msg for kw in skip_keywords)
+    if any(kw in msg for kw in skip_keywords):
+        return True
+
+    # Skip if commit has no meaningful file changes.
+    if commit_data is not None:
+        files = []
+        direct_files = commit_data.get("files")
+        if isinstance(direct_files, list):
+            files = [f for f in direct_files if isinstance(f, dict)]
+        else:
+            files_json = commit_data.get("files_json")
+            if isinstance(files_json, dict):
+                nested = files_json.get("files")
+                if isinstance(nested, list):
+                    files = [f for f in nested if isinstance(f, dict)]
+            elif isinstance(files_json, list):
+                files = [f for f in files_json if isinstance(f, dict)]
+
+        has_paths = any(str(f.get("file_path") or "").strip() for f in files)
+        diff_patch = str(commit_data.get("diff_patch") or "").strip()
+        # Skip near-empty/no-op diffs when file context is also weak.
+        if not has_paths and len(diff_patch) < 20:
+            return True
+
+    return False
 
 
 def calculate_heuristic_boost(commit: Dict[str, Any], requirement: Dict[str, Any]) -> float:
