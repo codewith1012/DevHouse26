@@ -489,24 +489,9 @@ def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] 
         store_embedding = True
         print(f"[COMMIT] Embedded {commit_id} (length: {len(commit_embedding)}). Attempting requirement match...")
 
-        candidates = None
-        try:
-            candidates = request_json(
-                "POST",
-                f"{BASE_REST_URL}/rpc/match_requirements",
-                payload={
-                    "query_embedding": commit_embedding,
-                    "match_threshold": float(MATCH_THRESHOLD),
-                    "match_count": 8,
-                },
-            )
-        except HTTPException as rpc_err:
-            if rpc_err.status_code == 404:
-                print("[WARN] match_requirements RPC not found (PGRST202). Falling back to Python matcher.")
-                candidates = _fallback_match_requirements(commit_embedding)
-            else:
-                print(f"[ERROR] match_requirements RPC failed ({rpc_err.status_code}): {rpc_err.detail}")
-                candidates = _fallback_match_requirements(commit_embedding)
+        # Core mapping path: cosine similarity between extension_events.embedding
+        # and req_code_mapping.embedding (Python-side for deterministic MVP behavior).
+        candidates = _cosine_match_requirements(commit_embedding)
 
         best_match = re_rank_candidates(candidates or [], event)
         best_conf = float(best_match.get("confidence", 0.0)) if best_match else 0.0
@@ -529,12 +514,22 @@ def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] 
                 f"{BASE_REST_URL}/rpc/append_commit_to_requirement",
                 payload={"p_issue_id": issue_id, "p_commit_data": commit_payload},
             )
+            patch_row(
+                "extension_events",
+                f"commit_id=eq.{parse.quote(commit_id)}",
+                {"issue_id": issue_id},
+            )
             APP_STATE["last_commit_id"] = commit_id
             print(
                 f"[COMMIT] Processed {commit_id} -> Mapped to {issue_id} "
                 f"(Confidence: {best_conf:.3f}, threshold: {dynamic_threshold:.3f})"
             )
         else:
+            patch_row(
+                "extension_events",
+                f"commit_id=eq.{parse.quote(commit_id)}",
+                {"issue_id": None},
+            )
             print(
                 f"[COMMIT] Processed {commit_id} -> No strong match found "
                 f"(best confidence: {best_conf:.3f}, threshold: {dynamic_threshold:.3f})"
@@ -603,15 +598,25 @@ def mark_commit_processed(
 
 
 def _fallback_match_requirements(commit_embedding: list[float]) -> list[dict[str, Any]]:
+    # Backward compatibility alias.
+    return _cosine_match_requirements(commit_embedding)
+
+
+def _cosine_match_requirements(commit_embedding: list[float]) -> list[dict[str, Any]]:
+    """
+    Computes cosine similarity directly between a commit embedding
+    (extension_events.embedding) and requirement embeddings
+    (req_code_mapping.embedding), returning top candidates.
+    """
     try:
         issues = get_rows(
             "req_code_mapping",
             "issue_id,title,description,embedding",
             order="jira_updated_at.asc",
-            limit=500,
+            limit=1000,
         )
     except Exception as exc:
-        print(f"[ERROR] Fallback: Failed to fetch requirements: {exc}")
+        print(f"[ERROR] Cosine matcher: Failed to fetch requirements: {exc}")
         return []
 
     candidates: list[dict[str, Any]] = []
