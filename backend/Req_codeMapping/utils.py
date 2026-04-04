@@ -1,4 +1,5 @@
 import math
+import re
 from typing import Any, Dict, List, Optional
 
 
@@ -88,21 +89,17 @@ def build_commit_context(commit_data: Dict[str, Any]) -> str:
 def should_skip_commit(message: str, commit_data: Optional[Dict[str, Any]] = None) -> bool:
     """
     Returns True if a commit message is too trivial to be worth embedding.
-    Uses substring matching so 'fix typo' or 'update readme' are caught too.
+    Keeps real work if there is clear Jira or file/diff context, and only skips
+    obviously trivial commits.
     """
     msg = message.lower().strip()
-    if len(msg) < 8:
-        return True
-    skip_keywords = {
-        "merge", "initial commit", "init", "wip", "update readme",
-        "bump version", "test", "fix typo", "dummy", "temp", "todo",
-    }
-    if any(kw in msg for kw in skip_keywords):
-        return True
 
-    # Skip if commit has no meaningful file changes.
+    files: List[Dict[str, Any]] = []
+    has_paths = False
+    diff_patch = ""
+    linked_issue = ""
+
     if commit_data is not None:
-        files = []
         direct_files = commit_data.get("files")
         if isinstance(direct_files, list):
             files = [f for f in direct_files if isinstance(f, dict)]
@@ -117,9 +114,42 @@ def should_skip_commit(message: str, commit_data: Optional[Dict[str, Any]] = Non
 
         has_paths = any(str(f.get("file_path") or "").strip() for f in files)
         diff_patch = str(commit_data.get("diff_patch") or "").strip()
-        # Skip near-empty/no-op diffs when file context is also weak.
-        if not has_paths and len(diff_patch) < 20:
-            return True
+        linked_issue = str(
+            commit_data.get("issue_id")
+            or commit_data.get("linked_issue")
+            or ""
+        ).strip()
+
+    explicit_jira_key = bool(re.search(r"\b[A-Z][A-Z0-9]+-\d+\b", message or ""))
+    has_code_context = has_paths or len(diff_patch) >= 20 or bool(linked_issue) or explicit_jira_key
+
+    # If there is real context, do not skip just because the message contains a noisy word.
+    if has_code_context:
+        return False
+
+    # Only very short messages with no usable code context should be skipped outright.
+    if len(msg) < 8:
+        return True
+
+    trivial_patterns = [
+        r"^merge\b",
+        r"^wip\b",
+        r"^initial commit$",
+        r"^init$",
+        r"^test$",
+        r"^temp(?:orary)?$",
+        r"^dummy$",
+        r"^todo$",
+        r"^fix typo(?:s)?$",
+        r"^update readme$",
+        r"^bump version$",
+    ]
+    if any(re.search(pattern, msg) for pattern in trivial_patterns):
+        return True
+
+    # Skip near-empty/no-op commits only when both message and code context are weak.
+    if not has_paths and len(diff_patch) < 20:
+        return True
 
     return False
 

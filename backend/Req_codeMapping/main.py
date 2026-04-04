@@ -240,6 +240,16 @@ def embed_requirements_endpoint(bg_tasks: BackgroundTasks) -> dict[str, Any]:
     return {"status": "queued", "message": "Embedding requirements in background. Watch logs for progress."}
 
 
+@app.post("/api/backfill-commit-links")
+def backfill_commit_links_endpoint(limit: int = 2000) -> dict[str, Any]:
+    repaired = backfill_requirement_commit_links(limit=limit)
+    return {
+        "status": "ok",
+        "scanned_limit": limit,
+        **repaired,
+    }
+
+
 @app.post("/api/jira-webhook")
 def jira_webhook(payload: dict[str, Any], bg_tasks: BackgroundTasks) -> dict[str, Any]:
     webhook_event = str(payload.get("webhookEvent") or "").lower()
@@ -457,33 +467,59 @@ async def process_single_commit(commit_id: str, event: Optional[dict[str, Any]] 
     await asyncio.to_thread(_process_single_commit_sync, commit_id, event)
 
 
+def _fetch_extension_event_by_commit_id(commit_id: str) -> Optional[dict[str, Any]]:
+    try:
+        events = request_json(
+            "GET",
+            f"{BASE_REST_URL}/extension_events?commit_id=eq.{parse.quote(commit_id)}&limit=1",
+        )
+    except Exception as exc:
+        print(f"[WARN] Failed to fetch full event row for {commit_id}: {exc}")
+        return None
+
+    if not events or not isinstance(events, list):
+        return None
+    return events[0]
+
+
+def _event_needs_hydration(event: dict[str, Any]) -> bool:
+    if not isinstance(event, dict):
+        return True
+    has_message = bool(str(event.get("message") or "").strip())
+    has_diff = bool(str(event.get("diff_patch") or "").strip())
+    has_issue = bool(str(event.get("issue_id") or event.get("linked_issue") or "").strip())
+    has_files = bool(event.get("files")) or bool(event.get("files_json"))
+    return not (has_message or has_diff or has_issue or has_files)
+
+
 def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] = None) -> None:
     store_embedding: Optional[bool] = None
     processed_done = False
     try:
-        if not event:
-            events = request_json(
-                "GET",
-                f"{BASE_REST_URL}/extension_events?commit_id=eq.{parse.quote(commit_id)}&limit=1",
-            )
-            if not events or not isinstance(events, list):
+        if not event or _event_needs_hydration(event):
+            full_event = _fetch_extension_event_by_commit_id(commit_id)
+            if not full_event:
                 print(f"[COMMIT] Processed {commit_id} -> No strong match found (best confidence: 0.000)")
                 return
-            event = events[0]
+            event = full_event
 
         message = str(event.get("message") or "").strip()
 
         if should_skip_commit(message, event):
             store_embedding = True
             processed_done = True
-            print(f"[COMMIT] Processed {commit_id} -> Skipped noise commit")
+            print(
+                f"[COMMIT] Processed {commit_id} -> Skipped noise commit "
+                f"(message='{message[:80]}', has_files={bool(event.get('files') or event.get('files_json'))}, "
+                f"has_diff={bool(str(event.get('diff_patch') or '').strip())})"
+            )
             return
 
         commit_context = build_commit_context(event)
         if not commit_context:
             store_embedding = True
             processed_done = True
-            print(f"[COMMIT] Processed {commit_id} -> Skipped noise commit")
+            print(f"[COMMIT] Processed {commit_id} -> Skipped because commit context is empty after hydration")
             return
 
         embeddings = embed_texts([f"query: {commit_context}"])
@@ -823,6 +859,8 @@ def _apply_commit_mapping(
         # Keep compatibility with schemas that do not yet include match metadata columns.
         pass
 
+    _append_commit_id_to_requirement(issue_id, commit_id)
+
     commit_payload = {
         "commit_id": commit_id,
         "message": event.get("message"),
@@ -831,15 +869,133 @@ def _apply_commit_mapping(
         "confidence": round(float(confidence), 4),
         "source": source,
     }
+    _append_commit_payload_to_requirement(issue_id, commit_id, commit_payload)
+
+
+def _append_commit_id_to_requirement(issue_id: str, commit_id: str) -> None:
+    if not issue_id or not commit_id:
+        return
     try:
-        request_json(
-            "POST",
-            f"{BASE_REST_URL}/rpc/append_commit_to_requirement",
-            payload={"p_issue_id": issue_id, "p_commit_data": commit_payload},
+        rows = request_json(
+            "GET",
+            f"{BASE_REST_URL}/req_code_mapping?select=issue_id,commits&issue_id=eq.{parse.quote(issue_id)}&limit=1",
         )
+        if not isinstance(rows, list) or not rows:
+            print(f"[WARN] Could not append commit {commit_id}: requirement {issue_id} not found")
+            return
+
+        row = rows[0]
+        existing_commits = row.get("commits") or []
+        if not isinstance(existing_commits, list):
+            existing_commits = []
+
+        normalized_commits = [
+            str(value).strip()
+            for value in existing_commits
+            if value is not None and str(value).strip()
+        ]
+        if commit_id in normalized_commits:
+            return
+
+        normalized_commits.append(commit_id)
+        patch_row(
+            "req_code_mapping",
+            f"issue_id=eq.{parse.quote(issue_id)}",
+            {"commits": normalized_commits},
+        )
+        print(f"[COMMIT] Linked commit {commit_id} into req_code_mapping.commits for {issue_id}")
     except Exception as exc:
-        # Keep commit->issue mapping even if requirement-append RPC fails.
-        print(f"[WARN] append_commit_to_requirement failed for {commit_id} -> {issue_id}: {exc}")
+        print(f"[WARN] Failed to append commit {commit_id} into requirement {issue_id}: {exc}")
+
+
+def _append_commit_payload_to_requirement(issue_id: str, commit_id: str, commit_payload: dict[str, Any]) -> None:
+    if not issue_id or not commit_id:
+        return
+
+    rpc_attempts = [
+        ("append_commit_to_requirement", {"p_issue_id": issue_id, "p_commit_data": commit_payload}),
+        ("append_commit_to_req", {"p_issue_id": issue_id, "p_commit_hash": commit_id}),
+    ]
+
+    for rpc_name, payload in rpc_attempts:
+        try:
+            request_json(
+                "POST",
+                f"{BASE_REST_URL}/rpc/{rpc_name}",
+                payload=payload,
+            )
+            return
+        except Exception as exc:
+            print(f"[WARN] {rpc_name} failed for {commit_id} -> {issue_id}: {exc}")
+
+
+def backfill_requirement_commit_links(limit: int = 2000) -> dict[str, Any]:
+    """
+    Repairs req_code_mapping.commits from existing extension_events rows that
+    already have an issue_id assigned.
+    """
+    safe_limit = max(1, min(int(limit), 10000))
+    query = (
+        "select=commit_id,issue_id"
+        "&issue_id=not.is.null"
+        "&commit_id=not.is.null"
+        f"&limit={safe_limit}"
+        "&order=timestamp.desc"
+    )
+    rows = request_json("GET", f"{BASE_REST_URL}/extension_events?{query}")
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=500, detail="Unexpected extension_events response during backfill")
+
+    issue_to_commits: dict[str, list[str]] = {}
+    scanned = 0
+    linked = 0
+
+    for row in rows:
+        issue_id = str(row.get("issue_id") or "").strip()
+        commit_id = str(row.get("commit_id") or "").strip()
+        if not issue_id or not commit_id:
+            continue
+        scanned += 1
+        issue_to_commits.setdefault(issue_id, []).append(commit_id)
+
+    updated_issues = 0
+    for issue_id, commit_ids in issue_to_commits.items():
+        try:
+            existing_rows = request_json(
+                "GET",
+                f"{BASE_REST_URL}/req_code_mapping?select=issue_id,commits&issue_id=eq.{parse.quote(issue_id)}&limit=1",
+            )
+            if not isinstance(existing_rows, list) or not existing_rows:
+                print(f"[WARN] Backfill skipped: requirement {issue_id} not found")
+                continue
+
+            existing_commits_raw = existing_rows[0].get("commits") or []
+            existing_commits = [
+                str(value).strip()
+                for value in existing_commits_raw
+                if value is not None and str(value).strip()
+            ] if isinstance(existing_commits_raw, list) else []
+
+            merged_commits = dedupe_preserve_order([*existing_commits, *commit_ids])
+            if merged_commits != existing_commits:
+                patch_row(
+                    "req_code_mapping",
+                    f"issue_id=eq.{parse.quote(issue_id)}",
+                    {"commits": merged_commits},
+                )
+                updated_issues += 1
+                print(f"[BACKFILL] Updated {issue_id} with {len(merged_commits)} linked commits")
+
+            linked += len(commit_ids)
+        except Exception as exc:
+            print(f"[WARN] Backfill failed for {issue_id}: {exc}")
+
+    return {
+        "scanned_events": scanned,
+        "updated_issues": updated_issues,
+        "linked_commits_seen": linked,
+        "matched_issue_count": len(issue_to_commits),
+    }
 
 
 def fetch_issues() -> list[dict[str, Any]]:
