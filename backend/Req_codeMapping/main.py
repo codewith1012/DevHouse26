@@ -260,10 +260,13 @@ def extension_events_webhook(payload: dict[str, Any], bg_tasks: BackgroundTasks)
         event = extract_event_from_payload(payload)
         commit_id = str(event.get("commit_id") or "").strip()
         if commit_id:
+            # Process this commit immediately for fast mapping.
             bg_tasks.add_task(process_single_commit, commit_id, event)
+            return {"status": "queued_processing", "commit_id": commit_id}
     except Exception as exc:
         print(f"[INFO] Webhook payload missing explicit commit_id: {exc}")
 
+    # Fallback: wake up queue only when commit_id could not be extracted.
     bg_tasks.add_task(process_unmapped_queue)
     return {"status": "queued_processing"}
 
@@ -443,6 +446,7 @@ async def process_single_commit(commit_id: str, event: Optional[dict[str, Any]] 
 
 def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] = None) -> None:
     store_embedding: Optional[bool] = None
+    processed_done = False
     try:
         if not event:
             events = request_json(
@@ -457,19 +461,22 @@ def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] 
         message = str(event.get("message") or "").strip()
 
         if should_skip_commit(message, event):
-            store_embedding = False
+            store_embedding = True
+            processed_done = True
             print(f"[COMMIT] Processed {commit_id} -> Skipped noise commit")
             return
 
         commit_context = build_commit_context(event)
         if not commit_context:
-            store_embedding = False
+            store_embedding = True
+            processed_done = True
             print(f"[COMMIT] Processed {commit_id} -> Skipped noise commit")
             return
 
         embeddings = embed_texts([f"query: {commit_context}"])
         if not embeddings:
             store_embedding = False
+            processed_done = False
             print(f"[COMMIT] Processed {commit_id} -> No strong match found (best confidence: 0.000)")
             return
 
@@ -534,9 +541,14 @@ def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] 
             )
 
     except Exception as exc:
+        processed_done = False
         print(f"[ERROR] Exception processing commit {commit_id}: {exc}")
     finally:
-        mark_commit_processed(commit_id, store_embedding=store_embedding)
+        mark_commit_processed(
+            commit_id,
+            store_embedding=store_embedding,
+            processed=processed_done,
+        )
 
 
 async def process_unmapped_queue() -> int:
@@ -547,7 +559,7 @@ async def process_unmapped_queue() -> int:
             await asyncio.sleep(0.1)
             query = (
                 "select=commit_id,message,files,files_json,diff_patch,timestamp,author,processed,embeddings_stored"
-                "&or=(processed.eq.false,embeddings_stored.eq.false,embedding.is.null)"
+                "&processed=eq.false"
                 "&order=timestamp.asc&limit=50"
             )
             pending = await asyncio.to_thread(request_json, "GET", f"{BASE_REST_URL}/extension_events?{query}")
@@ -573,12 +585,16 @@ async def process_unmapped_queue() -> int:
         return processed_count
 
 
-def mark_commit_processed(commit_id: str, store_embedding: Optional[bool] = None) -> None:
+def mark_commit_processed(
+    commit_id: str,
+    store_embedding: Optional[bool] = None,
+    processed: bool = True,
+) -> None:
     if not commit_id:
         return
     try:
         patch_query = f"commit_id=eq.{parse.quote(commit_id)}"
-        payload: dict[str, Any] = {"processed": True}
+        payload: dict[str, Any] = {"processed": processed}
         if store_embedding is not None:
             payload["embeddings_stored"] = bool(store_embedding)
         patch_row("extension_events", patch_query, payload)
