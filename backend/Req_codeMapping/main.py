@@ -199,7 +199,7 @@ def health() -> dict[str, Any]:
 def dashboard() -> dict[str, Any]:
     issues = get_rows(
         "req_code_mapping",
-        "issue_id,title,status,issue_type,priority,project_key,assignee_email,reporter_email,commits,created_at,updated_at",
+        "issue_id,title,status,issue_type,priority,project_key,assignee_email,reporter_email,commits,jira_created_at,due_date,created_at,updated_at",
         order="updated_at.desc",
         limit=100,
     )
@@ -350,6 +350,7 @@ def build_jira_record(issue: dict[str, Any]) -> dict[str, Any]:
         "reporter_email": fields.get("reporter", {}).get("emailAddress") if fields.get("reporter") else None,
         "jira_created_at": fields.get("created"),
         "jira_updated_at": fields.get("updated"),
+        "due_date": fields.get("duedate"),
     }
     if embedding:
         record["embedding"] = embedding

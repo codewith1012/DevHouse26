@@ -7,6 +7,7 @@ const API_BASE_URL =
   "http://127.0.0.1:8000";
 const JIRA_API_BASE_URL = import.meta.env.VITE_JIRA_API_URL || "";
 const ESTIMATE_API_BASE_URL = import.meta.env.VITE_ESTIMATE_API_URL || "http://127.0.0.1:8001";
+const RISK_API_BASE_URL = import.meta.env.VITE_RISK_API_URL || "http://127.0.0.1:8002";
 const managerFilters = ["Current Sprint", "Platform Team", "All Modules"];
 
 const issueColumns = [
@@ -648,6 +649,33 @@ function IntelligencePage({ issues, events, syncInfo, loading, error }) {
   const gridReveal = useRevealOnView();
   const [scopeReduction, setScopeReduction] = useState(10);
   const [addedDevelopers, setAddedDevelopers] = useState(1);
+  const [riskRequirements, setRiskRequirements] = useState([]);
+  const [riskLoading, setRiskLoading] = useState(true);
+  const [riskError, setRiskError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    async function loadRiskRequirements() {
+      setRiskLoading(true);
+      setRiskError("");
+      try {
+        const response = await fetch(`${RISK_API_BASE_URL}/api/risk/requirements?limit=8`);
+        if (!response.ok) throw new Error(`Risk engine request failed with ${response.status}`);
+        const payload = await response.json();
+        if (!active) return;
+        setRiskRequirements(Array.isArray(payload.requirements) ? payload.requirements : []);
+      } catch (fetchError) {
+        if (!active) return;
+        setRiskError(fetchError.message || "Failed to load requirement risk data");
+      } finally {
+        if (active) setRiskLoading(false);
+      }
+    }
+    loadRiskRequirements();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const linkedIssues = issues.filter((issue) => Array.isArray(issue.commits) && issue.commits.length > 0).length;
   const totalChanges = events.reduce((sum, event) => sum + Number(event.total_changes || 0), 0);
@@ -665,6 +693,19 @@ function IntelligencePage({ issues, events, syncInfo, loading, error }) {
   const alerts = buildAlerts({ baseRisk, delayProbability, repositoryRisk, linkedIssues, issues, syncInfo });
   const timelineItems = buildDecisionTimeline(events, issues);
   const requirementPredictions = buildRequirementPredictions(issues, events);
+  const liveRiskRows = useMemo(
+    () =>
+      riskRequirements.map((item) => ({
+        issue_id: item.requirement_id,
+        risk: `${Math.round(Number(item.risk_score || 0) * 100)}%`,
+        level: item.risk_level || "Unknown",
+        due_date: item.time?.deadline ? formatDate(item.time.deadline) : "No due date",
+        reason: Array.isArray(item.reasons) && item.reasons.length ? item.reasons[0] : "No explanation yet",
+        next_step: Array.isArray(item.recommendations) && item.recommendations.length ? item.recommendations[0] : "No recommendation yet",
+      })),
+    [riskRequirements],
+  );
+  const highestLiveRisk = riskRequirements[0] || null;
   const developerPredictions = buildDeveloperPredictions(events, issues);
   const forecastCards = buildForecastCards({ issues, events, linkedIssues, baseRisk, delayProbability, confidence });
   const topRequirements = buildTopRequirementSignals(issues, events);
@@ -766,6 +807,22 @@ function IntelligencePage({ issues, events, syncInfo, loading, error }) {
           <PredictionSummary items={forecastCards} />
         </PanelCard>
 
+        <PanelCard title="Live Risk Engine" subtitle="Requirement risk scored by the new backend engine" className={`reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          {riskError ? (
+            <p className="empty-state">{riskError}. Make sure the Risk Engine is running at {RISK_API_BASE_URL}.</p>
+          ) : riskLoading ? (
+            <p className="empty-state">Scoring requirements with the live risk engine...</p>
+          ) : highestLiveRisk ? (
+            <div className="prediction-summary-card">
+              <strong>{highestLiveRisk.requirement_id}</strong>
+              <p>{highestLiveRisk.risk_level} risk at {Math.round(Number(highestLiveRisk.risk_score || 0) * 100)}%.</p>
+              <p>{Array.isArray(highestLiveRisk.reasons) && highestLiveRisk.reasons.length ? highestLiveRisk.reasons[0] : "No explanation yet."}</p>
+            </div>
+          ) : (
+            <p className="empty-state">No live risk results available yet.</p>
+          )}
+        </PanelCard>
+
         <PanelCard title="Risk Breakdown Panel" subtitle="Why risk is high" className={`reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
           <ContributionBreakdown items={riskFactors} />
         </PanelCard>
@@ -783,11 +840,13 @@ function IntelligencePage({ issues, events, syncInfo, loading, error }) {
             columns={[
               { key: "issue_id", label: "Issue" },
               { key: "risk", label: "Risk" },
+              { key: "level", label: "Level" },
+              { key: "due_date", label: "Due Date" },
               { key: "reason", label: "Why" },
               { key: "next_step", label: "Recommended Action" },
             ]}
-            rows={requirementPredictions}
-            emptyMessage="No requirement predictions available yet."
+            rows={liveRiskRows.length ? liveRiskRows : requirementPredictions}
+            emptyMessage={riskLoading ? "Loading live requirement predictions..." : "No requirement predictions available yet."}
           />
         </PanelCard>
 

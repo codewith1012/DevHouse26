@@ -134,6 +134,7 @@ class JiraClient:
             "reporter_email": fields.get("reporter", {}).get("emailAddress") if fields.get("reporter") else None,
             "jira_created_at": fields.get("created"),
             "jira_updated_at": fields.get("updated"),
+            "due_date": fields.get("duedate"),
         }
         if vector:
             # Must be a JSON list of floats so Supabase stores vector(384) correctly.
@@ -211,6 +212,7 @@ class JiraClient:
                 "reporter",
                 "created",
                 "updated",
+                "duedate",
             ],
             "maxResults": max_results,
         }
@@ -240,6 +242,7 @@ class JiraClient:
             "reporter",
             "created",
             "updated",
+            "duedate",
         ]
         params = ",".join(fields)
         issue_url = f"{self.url}/rest/api/3/issue/{issue_key}?fields={params}"

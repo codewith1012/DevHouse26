@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS req_code_mapping (
   reporter_email  VARCHAR(255),
   jira_created_at TIMESTAMPTZ,
   jira_updated_at TIMESTAMPTZ,
+  due_date        DATE,
   embedding       vector(384) NULL,
 
   -- List of commit_hashes linked to this requirement
@@ -27,6 +28,9 @@ CREATE TABLE IF NOT EXISTS req_code_mapping (
 
 ALTER TABLE req_code_mapping
   ADD COLUMN IF NOT EXISTS embedding vector(384);
+
+ALTER TABLE req_code_mapping
+  ADD COLUMN IF NOT EXISTS due_date DATE;
 
 CREATE INDEX IF NOT EXISTS idx_rcm_status   ON req_code_mapping (status);
 CREATE INDEX IF NOT EXISTS idx_rcm_project  ON req_code_mapping (project_key);

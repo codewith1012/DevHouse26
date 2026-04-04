@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from datetime import datetime
+from datetime import date, datetime
 
 class JiraTicket(BaseModel):
     issue_id: str
@@ -14,6 +14,7 @@ class JiraTicket(BaseModel):
     reporter_email: Optional[str] = None
     jira_created_at: Optional[datetime] = None
     jira_updated_at: Optional[datetime] = None
+    due_date: Optional[date] = None
     commits: List[str] = []
 
 class JiraWebhookPayload(BaseModel):
