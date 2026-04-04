@@ -20,9 +20,10 @@ COPY . .
 
 # Set environment variables
 ENV PORT=10000
+ENV PYTHONUNBUFFERED=1
 
 # Make port 10000 available to the world outside this container
 EXPOSE 10000
 
 # Run the application using gunicorn with uvicorn workers for production
-CMD gunicorn -w 1 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:${PORT:-10000}
+CMD gunicorn -w 1 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:${PORT:-10000} --access-logfile - --error-logfile - --capture-output --log-level info
