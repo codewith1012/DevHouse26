@@ -11,6 +11,7 @@ from urllib import error, parse, request
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from supabase import create_client
 
 from utils import (
     build_commit_context,
@@ -100,6 +101,13 @@ def get_embedder():
 
     # threads=1 strictly reduces memory footprint ensuring it stays within 512MB RAM free tier
     return TextEmbedding(model_name=FASTEMBED_MODEL_NAME, threads=1)
+
+
+@lru_cache(maxsize=1)
+def get_supabase_client():
+    if not SUPABASE_URL or not SUPABASE_API_KEY:
+        raise RuntimeError("Missing Supabase credentials for RPC matching.")
+    return create_client(SUPABASE_URL, SUPABASE_API_KEY)
 
 
 def warm_embedding_model() -> None:
@@ -495,6 +503,26 @@ def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] 
         processed_done = True
         print(f"[COMMIT] Embedded {commit_id} (length: {len(commit_embedding)}). Attempting requirement match...")
 
+        mapped = map_commit_to_issue(commit_embedding, message)
+        mapped_issue_id = str(mapped.get("issue_id") or "").strip()
+        mapped_similarity = float(mapped.get("similarity", 0.0) or 0.0)
+        mapped_method = str(mapped.get("method") or "unmatched")
+
+        if mapped_issue_id and _requirement_exists(mapped_issue_id):
+            _apply_commit_mapping(
+                commit_id,
+                event,
+                mapped_issue_id,
+                confidence=mapped_similarity,
+                source=mapped_method,
+            )
+            APP_STATE["last_commit_id"] = commit_id
+            print(
+                f"[COMMIT] Processed {commit_id} -> Mapped to {mapped_issue_id} "
+                f"({mapped_method}, similarity: {mapped_similarity:.3f})"
+            )
+            return
+
         # Key-first mapping for highest precision when explicit Jira key is present.
         direct_issue_id = _resolve_direct_issue_id(event)
         if direct_issue_id and _requirement_exists(direct_issue_id):
@@ -619,10 +647,30 @@ def _fallback_match_requirements(commit_embedding: list[float]) -> list[dict[str
 
 def _cosine_match_requirements(commit_embedding: list[float], top_k: int = 8) -> list[dict[str, Any]]:
     """
-    Computes cosine similarity directly between a commit embedding
-    (extension_events.embedding) and requirement embeddings
-    (req_code_mapping.embedding), returning top candidates.
+    Use pgvector RPC instead of fetching all rows and computing in Python.
     """
+    try:
+        result = (
+            get_supabase_client()
+            .rpc(
+                "match_requirements",
+                {
+                    "query_embedding": commit_embedding,
+                    "match_threshold": MATCH_THRESHOLD,   # 0.35 from your env
+                    "match_count": top_k,
+                },
+            )
+            .execute()
+        )
+        return result.data if result.data else []
+    except Exception as exc:
+        print(f"[WARN] pgvector RPC failed, falling back to Python cosine: {exc}")
+        # Fallback: fetch and compute manually
+        return _python_cosine_fallback(commit_embedding, top_k)
+
+
+def _python_cosine_fallback(commit_embedding: list[float], top_k: int = 8) -> list[dict[str, Any]]:
+    """Original Python cosine logic as fallback only."""
     try:
         issues = get_rows(
             "req_code_mapping",
@@ -631,29 +679,26 @@ def _cosine_match_requirements(commit_embedding: list[float], top_k: int = 8) ->
             limit=1000,
         )
     except Exception as exc:
-        print(f"[ERROR] Cosine matcher: Failed to fetch requirements: {exc}")
+        print(f"[ERROR] Fallback cosine: Failed to fetch requirements: {exc}")
         return []
 
-    candidates: list[dict[str, Any]] = []
+    candidates = []
     for issue in issues:
         raw_embedding = issue.get("embedding")
         if not raw_embedding or not isinstance(raw_embedding, list):
             continue
         try:
-            issue_embedding = [float(value) for value in raw_embedding]
-            sim = cosine_similarity(commit_embedding, issue_embedding)
-            candidates.append(
-                {
-                    "issue_id": issue.get("issue_id"),
-                    "title": issue.get("title"),
-                    "description": issue.get("description"),
-                    "similarity": round(sim, 6),
-                }
-            )
+            sim = cosine_similarity(commit_embedding, [float(v) for v in raw_embedding])
+            candidates.append({
+                "issue_id": issue.get("issue_id"),
+                "title": issue.get("title"),
+                "description": issue.get("description"),
+                "similarity": round(sim, 6),
+            })
         except Exception:
             continue
 
-    candidates.sort(key=lambda value: value["similarity"], reverse=True)
+    candidates.sort(key=lambda v: v["similarity"], reverse=True)
     return candidates[:max(top_k, 1)]
 
 
@@ -693,6 +738,63 @@ def _requirement_exists(issue_id: str) -> bool:
         return False
 
 
+def find_matching_requirement(commit_embedding: list[float], threshold: float = 0.70) -> Optional[dict[str, Any]]:
+    """
+    Given a commit embedding, returns the best matching Jira requirement.
+    Falls back to None if no match exceeds the threshold.
+    """
+    if not commit_embedding:
+        return None
+
+    try:
+        result = (
+            get_supabase_client()
+            .rpc(
+                "match_requirements",
+                {
+                    "query_embedding": commit_embedding,
+                    "match_threshold": threshold,
+                    "match_count": 1,
+                },
+            )
+            .execute()
+        )
+    except Exception as exc:
+        print(f"[WARN] match_requirements RPC failed: {exc}")
+        return None
+
+    if result.data:
+        return result.data[0]
+    return None
+
+
+def map_commit_to_issue(commit_embedding: list[float], commit_message: str) -> dict[str, Any]:
+    """
+    Full mapping logic: explicit Jira key first, then semantic fallback.
+    """
+    match = re.search(r"\b[A-Z]+-\d+\b", str(commit_message or ""))
+    if match:
+        return {
+            "issue_id": match.group(),
+            "similarity": 1.0,
+            "method": "explicit_key",
+        }
+
+    best = find_matching_requirement(commit_embedding)
+    if best:
+        return {
+            "issue_id": best["issue_id"],
+            "similarity": best["similarity"],
+            "method": "semantic",
+        }
+
+    return {
+        "issue_id": None,
+        "similarity": 0.0,
+        "method": "unmatched",
+    }
+
+
 def _apply_commit_mapping(
     commit_id: str,
     event: dict[str, Any],
@@ -706,6 +808,20 @@ def _apply_commit_mapping(
         f"commit_id=eq.{parse.quote(commit_id)}",
         {"issue_id": issue_id},
     )
+
+    try:
+        patch_row(
+            "extension_events",
+            f"commit_id=eq.{parse.quote(commit_id)}",
+            {
+                "issue_id": issue_id,
+                "match_confidence": round(float(confidence), 4),
+                "match_method": source,
+            },
+        )
+    except Exception:
+        # Keep compatibility with schemas that do not yet include match metadata columns.
+        pass
 
     commit_payload = {
         "commit_id": commit_id,
