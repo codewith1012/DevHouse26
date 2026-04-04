@@ -913,7 +913,6 @@ def _append_commit_payload_to_requirement(issue_id: str, commit_id: str, commit_
         return
 
     rpc_attempts = [
-        ("append_commit_to_requirement", {"p_issue_id": issue_id, "p_commit_data": commit_payload}),
         ("append_commit_to_req", {"p_issue_id": issue_id, "p_commit_hash": commit_id}),
     ]
 
@@ -1005,7 +1004,7 @@ def fetch_issues() -> list[dict[str, Any]]:
 def fetch_events() -> list[dict[str, Any]]:
     return get_rows(
         "extension_events",
-        "commit_id,message,timestamp,files,files_json,diff_patch,repository_name,branch",
+        "commit_id,message,timestamp,files,files_json,diff_patch,repository_name,branch,issue_id",
         order="timestamp.asc",
         limit=500,
     )
@@ -1056,6 +1055,16 @@ def sync_commit_links() -> dict[str, Any]:
     commit_rows = []
     for event in events:
         commit_id = str(event.get("commit_id") or "").strip()
+        mapped_issue_id = str(event.get("issue_id") or "").strip()
+        if commit_id and mapped_issue_id and mapped_issue_id in issue_to_commits:
+            issue_to_commits[mapped_issue_id].append(commit_id)
+            issue_to_matches[mapped_issue_id].append(
+                {
+                    "commit_id": commit_id,
+                    "score": 1.0,
+                    "reasons": ["extension_events.issue_id mapping"],
+                }
+            )
         commit_text = build_commit_text(event)
         if commit_id and commit_text:
             commit_rows.append({"commit_id": commit_id, "text": commit_text})
@@ -1090,14 +1099,16 @@ def sync_commit_links() -> dict[str, Any]:
             if commit_id is not None and str(commit_id).strip() and str(commit_id) in valid_event_commit_ids
         ]
 
-        if sorted(matched_commit_ids) != sorted(existing):
-            patch_row("req_code_mapping", f"issue_id=eq.{parse.quote(issue_id)}", {"commits": matched_commit_ids})
+        merged_commit_ids = dedupe_preserve_order([*existing, *matched_commit_ids])
 
-        if matched_commit_ids:
+        if sorted(merged_commit_ids) != sorted(existing):
+            patch_row("req_code_mapping", f"issue_id=eq.{parse.quote(issue_id)}", {"commits": merged_commit_ids})
+
+        if merged_commit_ids:
             matched_issue_count += 1
-            total_linked_commits += len(matched_commit_ids)
+            total_linked_commits += len(merged_commit_ids)
 
-        updates.append({"issue_id": issue_id, "commits": matched_commit_ids, "matches": issue_to_matches[issue_id]})
+        updates.append({"issue_id": issue_id, "commits": merged_commit_ids, "matches": issue_to_matches[issue_id]})
 
     return {
         "updated_issues": len(updates),
