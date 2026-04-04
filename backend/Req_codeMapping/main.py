@@ -487,6 +487,7 @@ def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] 
             {"embedding": commit_embedding, "embeddings_stored": True},
         )
         store_embedding = True
+        processed_done = True
         print(f"[COMMIT] Embedded {commit_id} (length: {len(commit_embedding)}). Attempting requirement match...")
 
         # Core mapping path: cosine similarity between extension_events.embedding
@@ -520,6 +521,7 @@ def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] 
                 {"issue_id": issue_id},
             )
             APP_STATE["last_commit_id"] = commit_id
+            processed_done = True
             print(
                 f"[COMMIT] Processed {commit_id} -> Mapped to {issue_id} "
                 f"(Confidence: {best_conf:.3f}, threshold: {dynamic_threshold:.3f})"
@@ -530,6 +532,7 @@ def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] 
                 f"commit_id=eq.{parse.quote(commit_id)}",
                 {"issue_id": None},
             )
+            processed_done = True
             print(
                 f"[COMMIT] Processed {commit_id} -> No strong match found "
                 f"(best confidence: {best_conf:.3f}, threshold: {dynamic_threshold:.3f})"
