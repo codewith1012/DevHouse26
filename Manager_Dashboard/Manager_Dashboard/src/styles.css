@@ -1681,6 +1681,28 @@ td {
   color: var(--text-soft);
 }
 
+.risk-page {
+  padding-bottom: 28px;
+}
+
+.risk-table-row {
+  cursor: pointer;
+  transition: background 180ms ease, transform 180ms ease;
+}
+
+.risk-table-row:hover {
+  background: rgba(17, 17, 17, 0.04);
+}
+
+.risk-table-row.active {
+  background: rgba(17, 17, 17, 0.08);
+}
+
+.risk-detail-stack {
+  display: grid;
+  gap: 14px;
+}
+
 .prediction-metric,
 .action-card,
 .simulation-results > div {

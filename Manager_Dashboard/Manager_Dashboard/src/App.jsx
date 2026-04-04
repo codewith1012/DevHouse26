@@ -218,6 +218,8 @@ function App() {
             loading={loading}
             error={error}
           />
+        ) : route === "risk" ? (
+          <RiskPage />
         ) : route === "pricing" ? (
           <PricingPage />
         ) : route === "estimation" ? (
@@ -237,6 +239,7 @@ function TopNav({ route }) {
     { id: "intelligence", label: "Intelligence", href: "#/intelligence" },
     { id: "manager", label: "Manager", href: "#/manager" },
     { id: "developer", label: "Developer", href: "#/developer" },
+    { id: "risk", label: "Risk", href: "#/risk" },
     { id: "estimation", label: "Estimation", href: "#/estimation" },
     { id: "pricing", label: "Pricing", href: "#/pricing" },
   ];
@@ -699,7 +702,7 @@ function IntelligencePage({ issues, events, syncInfo, loading, error }) {
         issue_id: item.requirement_id,
         risk: `${Math.round(Number(item.risk_score || 0) * 100)}%`,
         level: item.risk_level || "Unknown",
-        due_date: item.time?.deadline ? formatDate(item.time.deadline) : "No due date",
+        due_date: item.due_date ? formatDate(item.due_date) : "No due date",
         reason: Array.isArray(item.reasons) && item.reasons.length ? item.reasons[0] : "No explanation yet",
         next_step: Array.isArray(item.recommendations) && item.recommendations.length ? item.recommendations[0] : "No recommendation yet",
       })),
@@ -1091,6 +1094,209 @@ function PricingPage() {
           <a className="button primary" href="#/pricing">Start Pilot</a>
           <a className="button secondary" href="#/pricing">Contact Sales</a>
         </div>
+      </section>
+    </div>
+  );
+}
+
+function RiskPage() {
+  const heroReveal = useRevealOnView();
+  const gridReveal = useRevealOnView();
+  const [riskRows, setRiskRows] = useState([]);
+  const [selectedRisk, setSelectedRisk] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    async function loadRiskRows() {
+      setLoading(true);
+      setError("");
+      try {
+        const response = await fetch(`${RISK_API_BASE_URL}/api/risk/requirements?limit=12`);
+        if (!response.ok) throw new Error(`Risk engine request failed with ${response.status}`);
+        const payload = await response.json();
+        if (!active) return;
+        const requirements = Array.isArray(payload.requirements) ? payload.requirements : [];
+        setRiskRows(requirements);
+        setSelectedRisk(requirements[0] ?? null);
+      } catch (fetchError) {
+        if (!active) return;
+        setError(fetchError.message || "Failed to load risk data");
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+    loadRiskRows();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const highRiskCount = riskRows.filter((item) => item.risk_level === "HIGH").length;
+  const mediumRiskCount = riskRows.filter((item) => item.risk_level === "MEDIUM").length;
+  const avgRisk = riskRows.length
+    ? Math.round((riskRows.reduce((sum, item) => sum + Number(item.risk_score || 0), 0) / riskRows.length) * 100)
+    : 0;
+
+  const riskTableRows = riskRows.map((item) => ({
+    issue_id: item.requirement_id,
+    title: item.title || "Untitled requirement",
+    risk_score: `${Math.round(Number(item.risk_score || 0) * 100)}%`,
+    risk_level: item.risk_level || "Unknown",
+    due_date: item.due_date ? formatDate(item.due_date) : "No due date",
+    recommendation: Array.isArray(item.recommendations) && item.recommendations.length ? item.recommendations[0] : "No recommendation",
+  }));
+
+  const selectedBreakdown = selectedRisk
+    ? [
+        { label: "Activity Drop", value: Math.round(Number(selectedRisk.breakdown?.activity_drop || 0) * 100), tone: "amber" },
+        { label: "Schedule Gap", value: Math.round(Number(selectedRisk.breakdown?.schedule_gap || 0) * 100), tone: "purple" },
+        { label: "Developer Load", value: Math.round(Number(selectedRisk.breakdown?.developer_load || 0) * 100), tone: "cyan" },
+        { label: "Complexity", value: Math.round(Number(selectedRisk.breakdown?.complexity || 0) * 100), tone: "green" },
+        { label: "Staleness", value: Math.round(Number(selectedRisk.breakdown?.staleness || 0) * 100), tone: "amber" },
+      ]
+    : [];
+
+  return (
+    <div className="page dashboard-page risk-page">
+      <section ref={heroReveal.ref} className={`dashboard-hero dashboard-stage reveal-block ${heroReveal.isVisible ? "is-visible" : ""}`}>
+        <div className="parallax-orb orb-c" />
+        <div>
+          <p className="eyebrow">Requirement Risk</p>
+          <h1>Track delivery risk requirement by requirement with clear explanations.</h1>
+          <p className="hero-text narrow">
+            This page turns live requirement activity into a clean risk review for managers: what is at risk, why it is at risk, and what the team should do next.
+          </p>
+        </div>
+        <div className="glass-card dashboard-float reveal-card is-visible" style={{ padding: "22px", display: "grid", gap: "14px" }}>
+          <p className="eyebrow" style={{ margin: 0 }}>Live portfolio view</p>
+          <div className="prediction-summary">
+            <article className="prediction-summary-card">
+              <strong>{loading ? "..." : `${avgRisk}%`}</strong>
+              <p>Average risk across tracked requirements</p>
+            </article>
+            <article className="prediction-summary-card">
+              <strong>{loading ? "..." : highRiskCount}</strong>
+              <p>Requirements currently in high-risk state</p>
+            </article>
+            <article className="prediction-summary-card">
+              <strong>{loading ? "..." : mediumRiskCount}</strong>
+              <p>Requirements that need attention soon</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      {error ? (
+        <StateCard
+          title="Risk engine not reachable"
+          text={`${error}. Make sure the Risk Engine is running at ${RISK_API_BASE_URL}.`}
+          error
+          className="reveal-card is-visible"
+        />
+      ) : null}
+
+      <section ref={gridReveal.ref} className={`dashboard-grid intelligence-grid reveal-block ${gridReveal.isVisible ? "is-visible" : ""}`}>
+        <PanelCard title="Requirement Risk Register" subtitle="All tracked requirements ranked by current risk" className={`span-2 reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          {loading ? (
+            <p className="empty-state">Loading requirement risk signals...</p>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>Title</th>
+                    <th>Risk</th>
+                    <th>Level</th>
+                    <th>Due Date</th>
+                    <th>Next Step</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {riskRows.length ? riskRows.map((item) => (
+                    <tr
+                      key={item.requirement_id}
+                      className={selectedRisk?.requirement_id === item.requirement_id ? "risk-table-row active" : "risk-table-row"}
+                      onClick={() => setSelectedRisk(item)}
+                    >
+                      <td>{item.requirement_id}</td>
+                      <td>{item.title || "Untitled requirement"}</td>
+                      <td>{Math.round(Number(item.risk_score || 0) * 100)}%</td>
+                      <td>{item.risk_level || "Unknown"}</td>
+                      <td>{item.due_date ? formatDate(item.due_date) : "No due date"}</td>
+                      <td>{Array.isArray(item.recommendations) && item.recommendations.length ? item.recommendations[0] : "No recommendation"}</td>
+                    </tr>
+                  )) : (
+                    <tr>
+                      <td colSpan="6">No live risk rows available yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </PanelCard>
+
+        <PanelCard title="Selected Requirement" subtitle={selectedRisk ? `${selectedRisk.requirement_id} risk detail` : "Choose a requirement to inspect"} className={`reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          {selectedRisk ? (
+            <div className="risk-detail-stack">
+              <div className="prediction-metric amber">
+                <span>Risk Score</span>
+                <strong>{Math.round(Number(selectedRisk.risk_score || 0) * 100)}%</strong>
+                <p>{selectedRisk.risk_level} risk based on live requirement activity and time progression.</p>
+              </div>
+              <div className="prediction-summary-card">
+                <strong>Deadline</strong>
+                <p>{selectedRisk.due_date ? formatDate(selectedRisk.due_date) : "No due date in Jira yet."}</p>
+              </div>
+              <div className="prediction-summary-card">
+                <strong>Days Remaining</strong>
+                <p>{selectedRisk.days_remaining ?? "N/A"}</p>
+              </div>
+            </div>
+          ) : (
+            <p className="empty-state">Select a requirement from the table to see detailed risk information.</p>
+          )}
+        </PanelCard>
+
+        <PanelCard title="Risk Breakdown" subtitle="Which signals are pushing the score upward" className={`reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          {selectedRisk ? <ContributionBreakdown items={selectedBreakdown} /> : <p className="empty-state">No breakdown available.</p>}
+        </PanelCard>
+
+        <PanelCard title="Why This Requirement Is At Risk" subtitle="Top explanation factors from the backend engine" className={`reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          {selectedRisk ? <SimpleList items={selectedRisk.reasons || []} /> : <p className="empty-state">No reasons available.</p>}
+        </PanelCard>
+
+        <PanelCard title="Recommended Actions" subtitle="What the team should do next" className={`span-2 reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          {selectedRisk ? (
+            <ActionCardList
+              items={(selectedRisk.recommendations || []).map((item, index) => ({
+                title: `Action ${index + 1}`,
+                description: item,
+                impact: "Expected to reduce delivery risk and improve schedule confidence.",
+                priority: index === 0 ? "High" : index === 1 ? "Medium" : "Low",
+              }))}
+            />
+          ) : (
+            <p className="empty-state">No recommendations available.</p>
+          )}
+        </PanelCard>
+
+        <PanelCard title="Portfolio Snapshot" subtitle="Quick scan of all current requirement risks" className={`span-2 reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          <DataTable
+            columns={[
+              { key: "issue_id", label: "Issue" },
+              { key: "risk_score", label: "Risk Score" },
+              { key: "risk_level", label: "Level" },
+              { key: "due_date", label: "Due Date" },
+              { key: "recommendation", label: "Primary Action" },
+            ]}
+            rows={riskTableRows}
+            emptyMessage={loading ? "Loading risk snapshot..." : "No risk snapshot available yet."}
+          />
+        </PanelCard>
       </section>
     </div>
   );
@@ -1598,6 +1804,7 @@ function HeroLoader({ progress }) {
 function getRoute() {
   const value = ((window.location.hash || "#/").replace(/^#/, "").replace(/\/+$/, "") || "/");
   if (value === "/pricing") return "pricing";
+  if (value === "/risk") return "risk";
   if (value === "/intelligence") return "intelligence";
   if (value === "/manager") return "manager";
   if (value === "/developer") return "developer";
