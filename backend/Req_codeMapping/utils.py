@@ -71,14 +71,16 @@ def build_commit_context(commit_data: Dict[str, Any]) -> str:
     diff_patch = str(commit_data.get("diff_patch") or "")
     patch_summary = extract_patch_summary(diff_patch, max_hunks=4)
 
-    # Build parts using pipe-delimited format for clarity
-    parts = [message]  # NO prefix here — caller applies 'query: ' at embed time
+    # Build weighted parts: message (high), files (medium), diff summary (low-medium)
+    # Repeating message once increases intent influence vs noisy diffs.
+    parts = [f"Commit message: {message}", f"Commit message: {message}"]
 
     if file_paths:
         parts.append(f"Changed files: {', '.join(file_paths[:8])}")  # cap at 8 files
 
     if patch_summary:
-        parts.append(f"Code changes: {patch_summary}")
+        # Keep diff as lowest-weight signal; patch is already truncated.
+        parts.append(f"Diff summary: {patch_summary}")
 
     return normalize_spaces(" | ".join(parts))
 

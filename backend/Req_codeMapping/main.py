@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -34,6 +35,8 @@ FASTEMBED_MODEL_NAME = os.getenv("REQ_MATCH_MODEL", "BAAI/bge-small-en-v1.5")
 MATCH_THRESHOLD = float(os.getenv("REQ_MATCH_THRESHOLD", "0.35"))
 COMMIT_MAP_THRESHOLD = float(os.getenv("COMMIT_MAP_THRESHOLD", "0.55"))
 BOOSTED_MAP_THRESHOLD = float(os.getenv("BOOSTED_MAP_THRESHOLD", "0.52"))
+LOW_CONFIDENCE_BAND = float(os.getenv("LOW_CONFIDENCE_BAND", "0.42"))
+MATCH_CANDIDATE_COUNT = int(os.getenv("MATCH_CANDIDATE_COUNT", "15"))
 AUTO_SYNC_ON_DASHBOARD = os.getenv("AUTO_SYNC_ON_DASHBOARD", "false").strip().lower() == "true"
 MAX_PATCH_CHARS = int(os.getenv("REQ_MATCH_MAX_PATCH_CHARS", "4000"))
 MAX_COMMIT_TEXT_CHARS = int(os.getenv("REQ_MATCH_MAX_COMMIT_TEXT_CHARS", "12000"))
@@ -55,6 +58,8 @@ APP_STATE: dict[str, Any] = {
     "last_commit_id": None,
     "last_queue_run_at": None,
 }
+
+JIRA_KEY_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
 
 app = FastAPI(title="Supabase Commit Sync API")
 
@@ -490,9 +495,16 @@ def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] 
         processed_done = True
         print(f"[COMMIT] Embedded {commit_id} (length: {len(commit_embedding)}). Attempting requirement match...")
 
-        # Core mapping path: cosine similarity between extension_events.embedding
-        # and req_code_mapping.embedding (Python-side for deterministic MVP behavior).
-        candidates = _cosine_match_requirements(commit_embedding)
+        # Key-first mapping for highest precision when explicit Jira key is present.
+        direct_issue_id = _resolve_direct_issue_id(event)
+        if direct_issue_id and _requirement_exists(direct_issue_id):
+            _apply_commit_mapping(commit_id, event, direct_issue_id, confidence=1.0, source="direct-key")
+            APP_STATE["last_commit_id"] = commit_id
+            print(f"[COMMIT] Processed {commit_id} -> Mapped to {direct_issue_id} (direct key match)")
+            return
+
+        # Semantic mapping: top-k cosine retrieval then heuristic re-rank.
+        candidates = _cosine_match_requirements(commit_embedding, top_k=MATCH_CANDIDATE_COUNT)
 
         best_match = re_rank_candidates(candidates or [], event)
         best_conf = float(best_match.get("confidence", 0.0)) if best_match else 0.0
@@ -503,28 +515,22 @@ def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] 
 
         if best_match and best_match.get("issue_id") and best_conf >= dynamic_threshold:
             issue_id = str(best_match["issue_id"])
-            commit_payload = {
-                "commit_id": commit_id,
-                "message": event.get("message"),
-                "timestamp": event.get("timestamp"),
-                "author": event.get("author"),
-                "confidence": round(best_conf, 4),
-            }
-            request_json(
-                "POST",
-                f"{BASE_REST_URL}/rpc/append_commit_to_requirement",
-                payload={"p_issue_id": issue_id, "p_commit_data": commit_payload},
-            )
-            patch_row(
-                "extension_events",
-                f"commit_id=eq.{parse.quote(commit_id)}",
-                {"issue_id": issue_id},
-            )
+            _apply_commit_mapping(commit_id, event, issue_id, confidence=best_conf, source="semantic")
             APP_STATE["last_commit_id"] = commit_id
             processed_done = True
             print(
                 f"[COMMIT] Processed {commit_id} -> Mapped to {issue_id} "
                 f"(Confidence: {best_conf:.3f}, threshold: {dynamic_threshold:.3f})"
+            )
+        elif best_match and best_match.get("issue_id") and best_conf >= LOW_CONFIDENCE_BAND:
+            # MVP bias: allow cautious mapping in low-confidence band.
+            issue_id = str(best_match["issue_id"])
+            _apply_commit_mapping(commit_id, event, issue_id, confidence=best_conf, source="low-confidence-band")
+            APP_STATE["last_commit_id"] = commit_id
+            processed_done = True
+            print(
+                f"[COMMIT] Processed {commit_id} -> Mapped to {issue_id} "
+                f"(Low confidence: {best_conf:.3f}, band: {LOW_CONFIDENCE_BAND:.3f})"
             )
         else:
             patch_row(
@@ -556,7 +562,7 @@ async def process_unmapped_queue() -> int:
         while True:
             await asyncio.sleep(0.1)
             query = (
-                "select=commit_id,message,files,files_json,diff_patch,timestamp,author,processed,embeddings_stored"
+                "select=commit_id,message,files,files_json,diff_patch,timestamp,author,branch,pr_title,linked_issue,processed,embeddings_stored"
                 "&processed=eq.false"
                 "&order=timestamp.asc&limit=50"
             )
@@ -605,7 +611,7 @@ def _fallback_match_requirements(commit_embedding: list[float]) -> list[dict[str
     return _cosine_match_requirements(commit_embedding)
 
 
-def _cosine_match_requirements(commit_embedding: list[float]) -> list[dict[str, Any]]:
+def _cosine_match_requirements(commit_embedding: list[float], top_k: int = 8) -> list[dict[str, Any]]:
     """
     Computes cosine similarity directly between a commit embedding
     (extension_events.embedding) and requirement embeddings
@@ -643,7 +649,70 @@ def _cosine_match_requirements(commit_embedding: list[float]) -> list[dict[str, 
             continue
 
     candidates.sort(key=lambda value: value["similarity"], reverse=True)
-    return candidates[:8]
+    return candidates[:max(top_k, 1)]
+
+
+def _extract_jira_keys(*texts: Any) -> list[str]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in texts:
+        text = str(raw or "")
+        for key in JIRA_KEY_PATTERN.findall(text):
+            normalized = key.upper()
+            if normalized not in seen:
+                seen.add(normalized)
+                keys.append(normalized)
+    return keys
+
+
+def _resolve_direct_issue_id(event: dict[str, Any]) -> Optional[str]:
+    keys = _extract_jira_keys(
+        event.get("message"),
+        event.get("branch"),
+        event.get("pr_title"),
+        event.get("linked_issue"),
+    )
+    return keys[0] if keys else None
+
+
+def _requirement_exists(issue_id: str) -> bool:
+    if not issue_id:
+        return False
+    try:
+        rows = request_json(
+            "GET",
+            f"{BASE_REST_URL}/req_code_mapping?select=issue_id&issue_id=eq.{parse.quote(issue_id)}&limit=1",
+        )
+        return isinstance(rows, list) and len(rows) > 0
+    except Exception:
+        return False
+
+
+def _apply_commit_mapping(
+    commit_id: str,
+    event: dict[str, Any],
+    issue_id: str,
+    confidence: float,
+    source: str,
+) -> None:
+    commit_payload = {
+        "commit_id": commit_id,
+        "message": event.get("message"),
+        "timestamp": event.get("timestamp"),
+        "author": event.get("author"),
+        "confidence": round(float(confidence), 4),
+        "source": source,
+    }
+    request_json(
+        "POST",
+        f"{BASE_REST_URL}/rpc/append_commit_to_requirement",
+        payload={"p_issue_id": issue_id, "p_commit_data": commit_payload},
+    )
+    patch_row(
+        "extension_events",
+        f"commit_id=eq.{parse.quote(commit_id)}",
+        {"issue_id": issue_id},
+    )
 
 
 def fetch_issues() -> list[dict[str, Any]]:
