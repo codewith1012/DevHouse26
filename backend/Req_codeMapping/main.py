@@ -505,6 +505,12 @@ def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] 
 
         # Semantic mapping: top-k cosine retrieval then heuristic re-rank.
         candidates = _cosine_match_requirements(commit_embedding, top_k=MATCH_CANDIDATE_COUNT)
+        if candidates:
+            top_preview = ", ".join(
+                f"{str(c.get('issue_id'))}:{float(c.get('similarity', 0.0)):.3f}"
+                for c in candidates[:3]
+            )
+            print(f"[COMMIT] Top cosine candidates for {commit_id}: {top_preview}")
 
         best_match = re_rank_candidates(candidates or [], event)
         best_conf = float(best_match.get("confidence", 0.0)) if best_match else 0.0
@@ -636,15 +642,14 @@ def _cosine_match_requirements(commit_embedding: list[float], top_k: int = 8) ->
         try:
             issue_embedding = [float(value) for value in raw_embedding]
             sim = cosine_similarity(commit_embedding, issue_embedding)
-            if sim >= MATCH_THRESHOLD:
-                candidates.append(
-                    {
-                        "issue_id": issue.get("issue_id"),
-                        "title": issue.get("title"),
-                        "description": issue.get("description"),
-                        "similarity": round(sim, 6),
-                    }
-                )
+            candidates.append(
+                {
+                    "issue_id": issue.get("issue_id"),
+                    "title": issue.get("title"),
+                    "description": issue.get("description"),
+                    "similarity": round(sim, 6),
+                }
+            )
         except Exception:
             continue
 
@@ -695,6 +700,13 @@ def _apply_commit_mapping(
     confidence: float,
     source: str,
 ) -> None:
+    # Always write the selected issue_id to extension_events first.
+    patch_row(
+        "extension_events",
+        f"commit_id=eq.{parse.quote(commit_id)}",
+        {"issue_id": issue_id},
+    )
+
     commit_payload = {
         "commit_id": commit_id,
         "message": event.get("message"),
@@ -703,16 +715,15 @@ def _apply_commit_mapping(
         "confidence": round(float(confidence), 4),
         "source": source,
     }
-    request_json(
-        "POST",
-        f"{BASE_REST_URL}/rpc/append_commit_to_requirement",
-        payload={"p_issue_id": issue_id, "p_commit_data": commit_payload},
-    )
-    patch_row(
-        "extension_events",
-        f"commit_id=eq.{parse.quote(commit_id)}",
-        {"issue_id": issue_id},
-    )
+    try:
+        request_json(
+            "POST",
+            f"{BASE_REST_URL}/rpc/append_commit_to_requirement",
+            payload={"p_issue_id": issue_id, "p_commit_data": commit_payload},
+        )
+    except Exception as exc:
+        # Keep commit->issue mapping even if requirement-append RPC fails.
+        print(f"[WARN] append_commit_to_requirement failed for {commit_id} -> {issue_id}: {exc}")
 
 
 def fetch_issues() -> list[dict[str, Any]]:
