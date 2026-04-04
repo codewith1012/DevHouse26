@@ -149,7 +149,7 @@ async def fallback_loop() -> None:
             APP_STATE["last_commits_processed"] = commit_count
         except Exception as exc:
             print(f"[ERROR] Fallback queue error: {exc}")
-        await asyncio.sleep(600)
+        await asyncio.sleep(30)
 
 
 @app.get("/api/health")
