@@ -27,6 +27,18 @@
       {
         "command": "devintel.runPresenceCheck",
         "title": "DevIntel: Run Presence Check"
+      },
+      {
+        "command": "devhouse.askAI",
+        "title": "DevHouse: Ask AI"
+      },
+      {
+        "command": "devhouse.generateAtCursor",
+        "title": "DevHouse: Generate At Cursor"
+      },
+      {
+        "command": "devhouse.refactorSelection",
+        "title": "DevHouse: Refactor Selection"
       }
     ],
     "configuration": {
@@ -61,6 +73,16 @@
           "type": "string",
           "default": "",
           "description": "Optional Python launcher for face detection, for example 'py' or 'python'."
+        },
+        "devintel.aiBackendUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8010",
+          "description": "Backend URL for DevHouse AI assistant requests."
+        },
+        "devintel.aiModel": {
+          "type": "string",
+          "default": "llama3.2:latest",
+          "description": "Model name to send with DevHouse AI requests."
         }
       }
     }

@@ -81,4 +81,49 @@ export interface ExtensionConfig {
     developerId: string;
     repositoryName: string;
     telemetryEnabled: boolean;
+    aiBackendUrl?: string;
+    aiModel?: string;
+}
+
+export interface AIQueryRequest {
+    prompt: string;
+    mode: 'ask' | 'generate' | 'refactor';
+    developer_id: string;
+    repository_name: string;
+    issue_id?: string | null;
+    model?: string;
+    file_path?: string | null;
+    language?: string | null;
+    selected_text?: string;
+    surrounding_code?: string;
+    selection?: {
+        start_line: number;
+        start_character: number;
+        end_line: number;
+        end_character: number;
+    } | null;
+}
+
+export interface AIEditInstruction {
+    kind?: 'replace_selection' | 'insert_at_cursor' | 'replace_full_document' | 'create_file';
+    file_path?: string;
+    content?: string;
+}
+
+export interface AIQueryResponse {
+    id?: string;
+    response?: string;
+    answer?: string;
+    output?: string;
+    message?: string;
+    model?: string;
+    input_tokens?: number;
+    output_tokens?: number;
+    usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        total_tokens?: number;
+    };
+    edit?: AIEditInstruction | null;
+    edits?: AIEditInstruction[];
 }

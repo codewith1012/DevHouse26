@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
@@ -38,6 +39,8 @@ COMMIT_MAP_THRESHOLD = float(os.getenv("COMMIT_MAP_THRESHOLD", "0.55"))
 BOOSTED_MAP_THRESHOLD = float(os.getenv("BOOSTED_MAP_THRESHOLD", "0.52"))
 LOW_CONFIDENCE_BAND = float(os.getenv("LOW_CONFIDENCE_BAND", "0.42"))
 MATCH_CANDIDATE_COUNT = int(os.getenv("MATCH_CANDIDATE_COUNT", "15"))
+AI_LINK_WINDOW_MINUTES = int(os.getenv("AI_LINK_WINDOW_MINUTES", "10"))
+EFFORT_ENGINE_URL = (os.getenv("EFFORT_ENGINE_URL") or "http://127.0.0.1:8003").rstrip("/")
 AUTO_SYNC_ON_DASHBOARD = os.getenv("AUTO_SYNC_ON_DASHBOARD", "false").strip().lower() == "true"
 MAX_PATCH_CHARS = int(os.getenv("REQ_MATCH_MAX_PATCH_CHARS", "4000"))
 MAX_COMMIT_TEXT_CHARS = int(os.getenv("REQ_MATCH_MAX_COMMIT_TEXT_CHARS", "12000"))
@@ -490,7 +493,96 @@ def _event_needs_hydration(event: dict[str, Any]) -> bool:
     has_diff = bool(str(event.get("diff_patch") or "").strip())
     has_issue = bool(str(event.get("issue_id") or event.get("linked_issue") or "").strip())
     has_files = bool(event.get("files")) or bool(event.get("files_json"))
-    return not (has_message or has_diff or has_issue or has_files)
+    has_identity = bool(str(event.get("developer_id") or "").strip()) and bool(str(event.get("repository_name") or "").strip())
+    has_timestamp = bool(str(event.get("timestamp") or "").strip())
+    return not (has_message or has_diff or has_issue or has_files) or not has_identity or not has_timestamp
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    candidates = [
+        raw,
+        raw.replace("Z", "+00:00"),
+    ]
+
+    if re.search(r"\d{2}:\d{2}$", raw) and "+" not in raw and re.search(r"\s\d{2}:\d{2}$", raw):
+        candidates.append(re.sub(r"\s(\d{2}:\d{2})$", r"+\1", raw))
+
+    for candidate in candidates:
+        try:
+            parsed = datetime.fromisoformat(candidate)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except ValueError:
+            continue
+    return None
+
+
+def _link_recent_ai_event_to_commit(commit_id: str, event: dict[str, Any]) -> None:
+    developer_id = str(event.get("developer_id") or "").strip()
+    repository_name = str(event.get("repository_name") or "").strip()
+    commit_issue_id = str(event.get("issue_id") or "").strip()
+    commit_time = _parse_timestamp(event.get("timestamp"))
+
+    if not developer_id or not repository_name or not commit_time:
+        return
+
+    query = (
+        "select=id,timestamp,issue_id,prompt,prompt_score"
+        "&commit_id=is.null"
+        f"&developer_id=eq.{parse.quote(developer_id)}"
+        f"&repository_name=eq.{parse.quote(repository_name)}"
+        "&order=timestamp.desc"
+        "&limit=20"
+    )
+
+    try:
+        rows = request_json("GET", f"{BASE_REST_URL}/ai_events?{query}")
+    except Exception as exc:
+        print(f"[WARN] Failed to query ai_events for commit {commit_id}: {exc}")
+        return
+
+    if not isinstance(rows, list) or not rows:
+        return
+
+    best_row: Optional[dict[str, Any]] = None
+    best_delta_seconds: Optional[float] = None
+    link_window_seconds = max(AI_LINK_WINDOW_MINUTES, 1) * 60
+
+    for row in rows:
+        ai_time = _parse_timestamp(row.get("timestamp"))
+        if not ai_time:
+            continue
+        delta_seconds = (commit_time - ai_time).total_seconds()
+        if delta_seconds < 0 or delta_seconds > link_window_seconds:
+            continue
+        if best_delta_seconds is None or delta_seconds < best_delta_seconds:
+            best_row = row
+            best_delta_seconds = delta_seconds
+
+    if not best_row:
+        return
+
+    ai_event_id = best_row.get("id")
+    if ai_event_id is None:
+        return
+
+    payload: dict[str, Any] = {"commit_id": commit_id}
+    if commit_issue_id and not str(best_row.get("issue_id") or "").strip():
+        payload["issue_id"] = commit_issue_id
+
+    try:
+        patch_row("ai_events", f"id=eq.{parse.quote(str(ai_event_id))}", payload)
+        print(
+            f"[AI] Linked ai_event {ai_event_id} to commit {commit_id} "
+            f"(window: {AI_LINK_WINDOW_MINUTES} min)"
+        )
+    except Exception as exc:
+        print(f"[WARN] Failed to link ai_event {ai_event_id} to commit {commit_id}: {exc}")
 
 
 def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] = None) -> None:
@@ -536,6 +628,7 @@ def _process_single_commit_sync(commit_id: str, event: Optional[dict[str, Any]] 
             f"commit_id=eq.{parse.quote(commit_id)}",
             {"embedding": commit_embedding, "embeddings_stored": True},
         )
+        _link_recent_ai_event_to_commit(commit_id, event)
         store_embedding = True
         processed_done = True
         print(f"[COMMIT] Embedded {commit_id} (length: {len(commit_embedding)}). Attempting requirement match...")
@@ -633,7 +726,7 @@ async def process_unmapped_queue() -> int:
         while True:
             await asyncio.sleep(0.1)
             query = (
-                "select=commit_id,message,files,files_json,diff_patch,timestamp,author,branch,pr_title,linked_issue,processed,embeddings_stored"
+                "select=commit_id,message,files,files_json,diff_patch,timestamp,author,branch,pr_title,linked_issue,processed,embeddings_stored,developer_id,repository_name,issue_id"
                 "&processed=eq.false"
                 "&order=timestamp.asc&limit=50"
             )
@@ -871,6 +964,22 @@ def _apply_commit_mapping(
         "source": source,
     }
     _append_commit_payload_to_requirement(issue_id, commit_id, commit_payload)
+    _trigger_effort_recalculation(issue_id)
+
+
+def _trigger_effort_recalculation(issue_id: str) -> None:
+    if not issue_id or not EFFORT_ENGINE_URL:
+        return
+
+    try:
+        request_json(
+            "POST",
+            f"{EFFORT_ENGINE_URL}/api/effort/recalculate/{parse.quote(issue_id)}",
+            headers={"Content-Type": "application/json"},
+        )
+        print(f"[EFFORT] Recalculated effort estimate for {issue_id}")
+    except Exception as exc:
+        print(f"[WARN] Effort recalculation failed for {issue_id}: {exc}")
 
 
 def _append_commit_id_to_requirement(issue_id: str, commit_id: str) -> None:
