@@ -140,6 +140,45 @@ button {
     0 10px 24px rgba(0, 0, 0, 0.05);
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.session-chip {
+  display: grid;
+  gap: 2px;
+  min-width: 150px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.48);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.session-chip span {
+  color: var(--text-soft);
+  font-size: 0.84rem;
+}
+
+.logout-button {
+  min-height: 44px;
+  padding: 0 16px;
+  color: #ffffff !important;
+  border: 1px solid #111111 !important;
+  background: #111111 !important;
+  box-shadow:
+    0 12px 26px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.logout-button:hover {
+  color: #ffffff !important;
+  border-color: #000000 !important;
+  background: #000000 !important;
+}
+
 .nav-link {
   padding: 10px 18px;
   border: 1px solid rgba(255, 255, 255, 0.22);
@@ -166,6 +205,103 @@ button {
 
 .page {
   padding-top: 16px;
+}
+
+.auth-page {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding-top: 24px;
+}
+
+.auth-shell {
+  width: min(1120px, 100%);
+  display: grid;
+  grid-template-columns: 1.08fr 0.92fr;
+  gap: 20px;
+  align-items: stretch;
+}
+
+.auth-story,
+.auth-form-card {
+  padding: 28px;
+}
+
+.auth-story h1,
+.auth-form-card h1 {
+  margin: 0 0 14px;
+  font-size: clamp(2.2rem, 4vw, 4rem);
+  line-height: 0.98;
+}
+
+.auth-role-grid,
+.auth-hint-list,
+.auth-form {
+  display: grid;
+  gap: 14px;
+}
+
+.auth-role-grid {
+  margin-top: 24px;
+}
+
+.auth-role-card {
+  display: grid;
+  gap: 6px;
+  padding: 18px 20px;
+  border: 1px solid rgba(17, 17, 17, 0.1);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.86);
+  color: #111111;
+  text-align: left;
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.auth-role-card span,
+.auth-hint-row span {
+  color: var(--text-soft);
+}
+
+.auth-role-card.active,
+.auth-role-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(17, 17, 17, 0.18);
+  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.08);
+}
+
+.auth-hint-list {
+  margin-top: 24px;
+}
+
+.auth-hint-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: #f7f7f7;
+}
+
+.auth-select,
+.auth-form input {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 14px;
+  border: 1px solid rgba(17, 17, 17, 0.12);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.98);
+  color: #111111;
+  outline: none;
+}
+
+.auth-submit-button {
+  min-height: 48px;
+  width: 100%;
+}
+
+.auth-error {
+  margin: 0;
+  color: #9d1a1a;
 }
 
 .eyebrow,
@@ -1685,6 +1821,136 @@ td {
   padding-bottom: 28px;
 }
 
+.overview-page {
+  padding-bottom: 28px;
+}
+
+.overview-action-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.overview-action-card {
+  text-decoration: none;
+}
+
+.assignment-page {
+  padding-bottom: 28px;
+}
+
+.assignment-recommendation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.assignment-card {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid rgba(17, 17, 17, 0.08);
+  border-radius: 20px;
+  background: #f7f7f7;
+}
+
+.assignment-card-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.assignment-card-top p,
+.assignment-directory-row p,
+.assignment-directory-row small {
+  margin: 4px 0 0;
+  color: var(--text-soft);
+}
+
+.assignment-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.assignment-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(17, 17, 17, 0.08);
+  color: #111111;
+  font-size: 0.86rem;
+}
+
+.assignment-directory {
+  display: grid;
+  gap: 12px;
+}
+
+.assignment-directory-row {
+  display: grid;
+  gap: 2px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: #f7f7f7;
+}
+
+.assignment-directory-row-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.assignment-delete-button {
+  min-height: 36px;
+  padding: 0 14px;
+}
+
+.assignment-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.assignment-field {
+  display: grid;
+  gap: 8px;
+}
+
+.assignment-field span {
+  color: var(--text-soft);
+}
+
+.assignment-field input,
+.assignment-field textarea {
+  width: 100%;
+  border: 1px solid rgba(17, 17, 17, 0.12);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.98);
+  color: #111111;
+  padding: 12px 14px;
+  outline: none;
+}
+
+.assignment-field textarea {
+  resize: vertical;
+  min-height: 104px;
+}
+
+.assignment-field-wide {
+  grid-column: span 2;
+}
+
+.assignment-form-actions {
+  grid-column: span 2;
+  display: flex;
+  justify-content: flex-end;
+}
+
 .risk-table-row {
   cursor: pointer;
   transition: background 180ms ease, transform 180ms ease;
@@ -1876,6 +2142,10 @@ td {
     grid-template-columns: 1fr 1fr;
   }
 
+  .auth-shell {
+    grid-template-columns: 1fr;
+  }
+
   .hero-content-grid {
     padding: 108px 34px 156px;
   }
@@ -1905,7 +2175,9 @@ td {
 
   .intelligence-top-grid,
   .intelligence-metric-grid,
-  .simulation-results {
+  .simulation-results,
+  .assignment-recommendation-grid,
+  .overview-action-grid {
     grid-template-columns: 1fr 1fr;
   }
 }
@@ -1942,6 +2214,12 @@ td {
     flex-direction: column;
     align-items: flex-start;
     border-radius: 24px;
+  }
+
+  .topbar-actions {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .page {
@@ -2007,8 +2285,19 @@ td {
   .pricing-support-grid,
   .intelligence-top-grid,
   .intelligence-metric-grid,
-  .simulation-results {
+  .simulation-results,
+  .assignment-recommendation-grid,
+  .overview-action-grid {
     grid-template-columns: 1fr;
+  }
+
+  .assignment-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .assignment-field-wide,
+  .assignment-form-actions {
+    grid-column: auto;
   }
 }
 
@@ -2034,6 +2323,11 @@ td {
   .risk-row,
   .modal-head,
   .explain-grid {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .auth-hint-row {
     flex-direction: column;
     align-items: flex-start;
   }

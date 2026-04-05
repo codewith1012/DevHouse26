@@ -6,9 +6,38 @@ const API_BASE_URL =
   import.meta.env.VITE_API_URL ||
   "http://127.0.0.1:8000";
 const JIRA_API_BASE_URL = import.meta.env.VITE_JIRA_API_URL || "";
-const ESTIMATE_API_BASE_URL = import.meta.env.VITE_ESTIMATE_API_URL || "http://127.0.0.1:8001";
+const ESTIMATE_API_BASE_URL = import.meta.env.VITE_ESTIMATE_API_URL || "http://127.0.0.1:8003";
 const RISK_API_BASE_URL = import.meta.env.VITE_RISK_API_URL || "http://127.0.0.1:8002";
+const ASSIGNMENT_API_BASE_URL = import.meta.env.VITE_ASSIGNMENT_API_URL || "http://127.0.0.1:8004";
 const managerFilters = ["Current Sprint", "Platform Team", "All Modules"];
+const AUTH_STORAGE_KEY = "devhouse.frontend.jwt";
+const NAV_LINKS = [
+  { id: "overview", label: "Overview", href: "#/" },
+  { id: "risk", label: "Requirement Intel", href: "#/risk" },
+  { id: "team", label: "Team Intel", href: "#/team" },
+  { id: "developer", label: "Developer Intel", href: "#/developer" },
+  { id: "assignments", label: "Task Assignment", href: "#/assignments" },
+  { id: "estimation", label: "Estimation Intel", href: "#/estimation" },
+  { id: "alerts", label: "Alerts & Insights", href: "#/alerts" },
+];
+const ROLE_ROUTE_MAP = {
+  manager: NAV_LINKS.map((item) => item.id),
+  developer: ["developer"],
+};
+const DEMO_ACCOUNTS = [
+  {
+    role: "manager",
+    name: "Manager Demo",
+    email: "manager@devhouse.local",
+    password: "manager123",
+  },
+  {
+    role: "developer",
+    name: "Developer Demo",
+    email: "developer@devhouse.local",
+    password: "developer123",
+  },
+];
 
 const issueColumns = [
   { key: "issue_id", label: "Issue" },
@@ -76,6 +105,7 @@ const developerTimeline = [
 
 function App() {
   const [route, setRoute] = useState(getRoute());
+  const [auth, setAuth] = useState(() => readStoredSession());
   const [events, setEvents] = useState([]);
   const [issues, setIssues] = useState([]);
   const [syncInfo, setSyncInfo] = useState(null);
@@ -89,11 +119,28 @@ function App() {
   useEffect(() => {
     const onHashChange = () => startTransition(() => setRoute(getRoute()));
     window.addEventListener("hashchange", onHashChange);
-    if (!window.location.hash) window.location.hash = "#/";
+    if (auth && !window.location.hash) window.location.hash = routeToHash(getDefaultRouteForRole(auth.role));
     return () => window.removeEventListener("hashchange", onHashChange);
-  }, []);
+  }, [auth]);
 
   useEffect(() => {
+    if (!auth) return;
+    const safeRoute = getSafeRouteForRole(route, auth.role);
+    if (safeRoute !== route) {
+      startTransition(() => setRoute(safeRoute));
+      window.location.hash = routeToHash(safeRoute);
+    }
+  }, [auth, route]);
+
+  useEffect(() => {
+    if (!auth) {
+      setEvents([]);
+      setIssues([]);
+      setSyncInfo(null);
+      setLoading(false);
+      return;
+    }
+
     async function loadDashboard() {
       setLoading(true);
       setError("");
@@ -111,7 +158,37 @@ function App() {
       }
     }
     loadDashboard();
-  }, []);
+  }, [auth]);
+
+  function handleLogin(credentials) {
+    const matchedAccount = DEMO_ACCOUNTS.find(
+      (account) =>
+        account.email.toLowerCase() === credentials.email.trim().toLowerCase() &&
+        account.password === credentials.password,
+    );
+
+    if (!matchedAccount) {
+      return {
+        ok: false,
+        error: "Use the demo credentials for the selected role to create a JWT session.",
+      };
+    }
+
+    const session = createJwtSession(matchedAccount);
+    localStorage.setItem(AUTH_STORAGE_KEY, session.token);
+    setAuth(session);
+    const nextRoute = getDefaultRouteForRole(session.role);
+    setRoute(nextRoute);
+    window.location.hash = routeToHash(nextRoute);
+    return { ok: true };
+  }
+
+  function handleLogout() {
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+    setAuth(null);
+    setRoute("overview");
+    window.location.hash = "#/";
+  }
 
   const scopedEvents = useMemo(() => filterEventsByManagerView(events, selectedFilter), [events, selectedFilter]);
   const scopedIssues = useMemo(() => filterIssuesByManagerView(issues, scopedEvents, selectedFilter), [issues, scopedEvents, selectedFilter]);
@@ -177,9 +254,20 @@ function App() {
 
   return (
     <div className="app-shell">
-      <TopNav route={route} />
+      {auth ? <TopNav route={route} auth={auth} onLogout={handleLogout} /> : null}
       <main>
-        {route === "manager" ? (
+        {!auth ? (
+          <LoginPage onLogin={handleLogin} />
+        ) : route === "overview" ? (
+          <OverviewPage
+            issues={issues}
+            events={events}
+            syncInfo={syncInfo}
+            loading={loading}
+            error={error}
+            healthSignals={healthSignals}
+          />
+        ) : route === "team" ? (
           <ManagerPage
             query={query}
             setQuery={setQuery}
@@ -203,7 +291,7 @@ function App() {
             setActiveSearchSuggestion={setActiveSearchSuggestion}
             setSelectedReason={setSelectedReason}
           />
-        ) : route === "intelligence" ? (
+        ) : route === "alerts" ? (
           <IntelligencePage
             issues={issues}
             events={events}
@@ -220,12 +308,21 @@ function App() {
           />
         ) : route === "risk" ? (
           <RiskPage />
+        ) : route === "assignments" ? (
+          <AssignmentsPage />
         ) : route === "pricing" ? (
           <PricingPage />
         ) : route === "estimation" ? (
           <EstimationPage />
         ) : (
-          <LandingPage />
+          <OverviewPage
+            issues={issues}
+            events={events}
+            syncInfo={syncInfo}
+            loading={loading}
+            error={error}
+            healthSignals={healthSignals}
+          />
         )}
       </main>
       {selectedReason ? <ExplainabilityModal card={selectedReason} onClose={() => setSelectedReason(null)} /> : null}
@@ -233,24 +330,16 @@ function App() {
   );
 }
 
-function TopNav({ route }) {
-  const links = [
-    { id: "landing", label: "Home", href: "#/" },
-    { id: "intelligence", label: "Intelligence", href: "#/intelligence" },
-    { id: "manager", label: "Manager", href: "#/manager" },
-    { id: "developer", label: "Developer", href: "#/developer" },
-    { id: "risk", label: "Risk", href: "#/risk" },
-    { id: "estimation", label: "Estimation", href: "#/estimation" },
-    { id: "pricing", label: "Pricing", href: "#/pricing" },
-  ];
+function TopNav({ route, auth, onLogout }) {
+  const links = NAV_LINKS.filter((item) => isRouteAllowedForRole(item.id, auth?.role));
 
   return (
     <header className="topbar">
-      <a className="brand" href="#/">
+      <a className="brand" href={routeToHash(getDefaultRouteForRole(auth?.role))}>
         <span className="brand-mark">DH</span>
         <div>
           <strong>DevHouse</strong>
-          <span>Designed for Tech Lead Manager (TLM)</span>
+          <span>{auth?.role === "manager" ? "Manager workspace" : "Developer workspace"}</span>
         </div>
       </a>
       <nav className="topnav">
@@ -260,7 +349,72 @@ function TopNav({ route }) {
           </a>
         ))}
       </nav>
+      <div className="topbar-actions">
+        <div className="session-chip">
+          <strong>{auth?.name || "User"}</strong>
+        </div>
+        <button type="button" className="button secondary logout-button" onClick={onLogout}>
+          Logout
+        </button>
+      </div>
     </header>
+  );
+}
+
+function LoginPage({ onLogin }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    const result = onLogin({ email, password });
+    if (!result.ok) {
+      setError(result.error || "Login failed.");
+    }
+  }
+
+  return (
+    <section className="page auth-page">
+      <div className="auth-shell">
+        <article className="auth-story glass-card">
+          <p className="eyebrow">JWT Access</p>
+          <h1>Sign in to the DevHouse intelligence workspace.</h1>
+          <p className="hero-text narrow">
+            Sign in with your manager or developer credentials and DevHouse will open the right workspace automatically.
+          </p>
+          <div className="auth-role-grid">
+            {DEMO_ACCOUNTS.map((account) => (
+              <button
+                key={account.role}
+                type="button"
+                className="auth-role-card"
+                disabled
+              >
+                <strong>{formatRoleLabel(account.role)}</strong>
+                <span>{account.role === "manager" ? "Full intelligence suite" : "Focused developer view"}</span>
+              </button>
+            ))}
+          </div>
+        </article>
+
+        <article className="auth-form-card glass-card">
+          <p className="eyebrow">Login</p>
+          <form className="auth-form" onSubmit={handleSubmit}>
+            <label className="assignment-field">
+              <span>Email</span>
+              <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@devhouse.local" />
+            </label>
+            <label className="assignment-field">
+              <span>Password</span>
+              <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter password" />
+            </label>
+            {error ? <p className="auth-error">{error}</p> : null}
+            <button type="submit" className="button primary auth-submit-button">Login</button>
+          </form>
+        </article>
+      </div>
+    </section>
   );
 }
 
@@ -447,6 +601,108 @@ function LandingPage() {
   );
 }
 
+function OverviewPage({ issues, events, syncInfo, loading, error, healthSignals }) {
+  const heroReveal = useRevealOnView();
+  const gridReveal = useRevealOnView();
+  const linkedRequirements = issues.filter((issue) => Array.isArray(issue.commits) && issue.commits.length > 0).length;
+  const totalRequirements = issues.length;
+  const totalChanges = events.reduce((sum, event) => sum + Number(event.total_changes || 0), 0);
+  const unlinkedRequirements = Math.max(totalRequirements - linkedRequirements, 0);
+  const teamRiskScore = Math.round(clamp(32 + unlinkedRequirements * 7 + Math.max(events.length - 12, 0) * 1.8, 8, 96));
+  const sprintCompletionProbability = Math.round(clamp(88 - unlinkedRequirements * 8 + linkedRequirements * 2.5, 6, 98));
+  const highRiskRequirements = buildExecutiveHighRiskRequirements(issues, events);
+  const keyAlerts = buildExecutiveAlerts(issues, events, syncInfo);
+  const quickActions = [
+    { title: "Review high-risk requirements", description: "Jump into Requirement Intelligence to inspect the top five slipping items.", href: "#/risk" },
+    { title: "Rebalance team load", description: "Open Team Intelligence to spot overloaded developers and concentrated ownership.", href: "#/team" },
+    { title: "Assign the next feature", description: "Use Task Assignment to match the next requirement to the best-fit developer.", href: "#/assignments" },
+  ];
+
+  return (
+    <div className="page dashboard-page overview-page">
+      <section ref={heroReveal.ref} className={`dashboard-hero dashboard-stage reveal-block ${heroReveal.isVisible ? "is-visible" : ""}`}>
+        <div className="parallax-orb orb-c" />
+        <div>
+          <p className="eyebrow">Overview / Executive Dashboard</p>
+          <h1>Get the current state in 10 seconds.</h1>
+          <p className="hero-text narrow">
+            This layer gives leadership a fast read on team risk, sprint confidence, top requirement threats, urgent alerts, and the next best actions.
+          </p>
+        </div>
+        <div className="glass-card dashboard-float reveal-card is-visible" style={{ padding: "22px", display: "grid", gap: "14px" }}>
+          <p className="eyebrow" style={{ margin: 0 }}>Executive snapshot</p>
+          <div className="prediction-summary">
+            <article className="prediction-summary-card">
+              <strong>{loading ? "..." : `${teamRiskScore}%`}</strong>
+              <p>Team risk score</p>
+            </article>
+            <article className="prediction-summary-card">
+              <strong>{loading ? "..." : `${sprintCompletionProbability}%`}</strong>
+              <p>Sprint completion probability</p>
+            </article>
+            <article className="prediction-summary-card">
+              <strong>{loading ? "..." : linkedRequirements}</strong>
+              <p>Requirements with linked delivery evidence</p>
+            </article>
+            <article className="prediction-summary-card">
+              <strong>{loading ? "..." : totalChanges}</strong>
+              <p>Tracked code changes in the current view</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      {syncInfo ? <section className="status-banner glass-card reveal-card is-visible"><strong>Live update</strong><span>{syncInfo.linked_commits || 0} linked commits across {syncInfo.matched_issues || 0} requirements during the latest refresh.</span></section> : null}
+      {error ? <StateCard title="Backend not reachable" text={`${error}. Executive metrics will populate once the API is running.`} error className="reveal-card is-visible" /> : null}
+
+      <section className="kpi-grid reveal-card is-visible">
+        {healthSignals.map((card) => (
+          <article key={card.title} className={`kpi-card ${card.tone}`}>
+            <div className="kpi-topline"><span>{card.title}</span></div>
+            <strong>{card.value}</strong>
+            <p>{card.description}</p>
+            <small>{card.change}</small>
+          </article>
+        ))}
+      </section>
+
+      <section ref={gridReveal.ref} className={`dashboard-grid reveal-block ${gridReveal.isVisible ? "is-visible" : ""}`}>
+        <PanelCard title="High-Risk Requirements" subtitle="Top 5 requirements that need immediate attention" className={`span-2 reveal-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          <DataTable
+            columns={[
+              { key: "issue_id", label: "Issue" },
+              { key: "title", label: "Requirement" },
+              { key: "risk", label: "Risk" },
+              { key: "status", label: "Status" },
+              { key: "signal", label: "Signal" },
+            ]}
+            rows={highRiskRequirements}
+            emptyMessage={loading ? "Loading executive risk signals..." : "No high-risk requirement signals yet."}
+          />
+        </PanelCard>
+
+        <PanelCard title="Key Alerts" subtitle="What needs attention right now" className={`reveal-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          <SimpleList items={keyAlerts} />
+        </PanelCard>
+
+        <PanelCard title="Quick Actions" subtitle="Fast ways to move from signal to action" className={`span-2 reveal-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          <div className="overview-action-grid">
+            {quickActions.map((item) => (
+              <a key={item.title} className="action-card overview-action-card" href={item.href}>
+                <div className="action-card-top">
+                  <strong>{item.title}</strong>
+                  <span className="priority-badge medium">Open</span>
+                </div>
+                <p>{item.description}</p>
+              </a>
+            ))}
+          </div>
+        </PanelCard>
+      </section>
+    </div>
+  );
+}
+
 function ManagerPage({ query, setQuery, selectedFilter, setSelectedFilter, loading, error, managerEmpty, syncInfo, healthSignals, issueRows, commitRows, statusBreakdown, repositoryBreakdown, impactLeaderboard, managerTrend, workloadHeatmap, searchSuggestions, activeDeveloperFocus, activeIssueFocus, setActiveSearchSuggestion, setSelectedReason }) {
   const heroReveal = useRevealOnView();
   const kpiReveal = useRevealOnView();
@@ -457,9 +713,9 @@ function ManagerPage({ query, setQuery, selectedFilter, setSelectedFilter, loadi
       <section ref={heroReveal.ref} className={`dashboard-hero dashboard-stage reveal-block ${heroReveal.isVisible ? "is-visible" : ""}`}>
         <div className="parallax-orb orb-c" />
         <div>
-          <p className="eyebrow">Manager Dashboard</p>
-          <h1>Turn engineering activity into executive decisions.</h1>
-          <p className="hero-text narrow">See who is creating value, where delivery is at risk, and why your impact scores are rising or falling.</p>
+          <p className="eyebrow">Team Intelligence</p>
+          <h1>See whether your team is healthy, balanced, and shipping well.</h1>
+          <p className="hero-text narrow">Track workload distribution, throughput spread, dependency concentration, and the signals that show where team health is drifting.</p>
         </div>
         <div className="toolbar dashboard-float">
           <label className="search-input">
@@ -619,9 +875,9 @@ function DeveloperPage({ issues, events, loading, error }) {
       <section ref={heroReveal.ref} className={`dashboard-hero developer-hero dashboard-stage reveal-block ${heroReveal.isVisible ? "is-visible" : ""}`}>
         <div className="parallax-orb orb-d" />
         <div>
-          <p className="eyebrow">Developer Dashboard</p>
-          <h1>Your impact is visible, fair, and built to help you grow.</h1>
-          <p className="hero-text narrow">This view now uses live database-backed commit and requirement data to show contribution patterns without turning work into surveillance.</p>
+          <p className="eyebrow">Developer Intelligence</p>
+          <h1>Understand how each developer is performing and contributing.</h1>
+          <p className="hero-text narrow">This view turns live commit and requirement evidence into developer-level signals for load, ownership, throughput, and contribution quality.</p>
         </div>
         <div className="developer-spotlight glass-card dashboard-float reveal-card is-visible">
           <span className="spotlight-label">Personal Impact Score</span>
@@ -735,13 +991,13 @@ function IntelligencePage({ issues, events, syncInfo, loading, error }) {
       <section ref={heroReveal.ref} className={`dashboard-hero dashboard-stage intelligence-hero reveal-block ${heroReveal.isVisible ? "is-visible" : ""}`}>
         <div className="parallax-orb orb-c" />
         <div>
-          <p className="eyebrow">Decision Intelligence</p>
-          <h1>Make predictive analytics feel like clear, guided decision-making.</h1>
-          <p className="hero-text narrow">This page translates your backend intelligence into a frontend story that answers what will happen, why it will happen, and what should happen next.</p>
+          <p className="eyebrow">Alerts & Insights</p>
+          <h1>Tell me what needs attention now and what to do next.</h1>
+          <p className="hero-text narrow">This page pulls urgent delivery signals, suggested actions, prediction context, and ranked interventions into one operational view.</p>
         </div>
         <div className="intelligence-summary glass-card dashboard-float reveal-card parallax-card is-visible">
-          <span className="spotlight-label">Frontend Mission</span>
-          <strong>Prediction + Explanation + Prescription</strong>
+          <span className="spotlight-label">Immediate Attention Layer</span>
+          <strong>Alerts + Why + Action</strong>
           <p>{loading ? "Loading live delivery signals..." : `Using ${issues.length} requirements, ${events.length} delivery events, and ${totalChanges} tracked code changes to drive the view.`}</p>
         </div>
       </section>
@@ -1188,10 +1444,10 @@ function RiskPage() {
       <section ref={heroReveal.ref} className={`dashboard-hero dashboard-stage reveal-block ${heroReveal.isVisible ? "is-visible" : ""}`}>
         <div className="parallax-orb orb-c" />
         <div>
-          <p className="eyebrow">Requirement Risk</p>
-          <h1>Track delivery risk requirement by requirement with clear explanations.</h1>
+          <p className="eyebrow">Requirement Intelligence</p>
+          <h1>See which features are at risk and why.</h1>
           <p className="hero-text narrow">
-            This page turns live requirement activity into a clean risk review for managers: what is at risk, why it is at risk, and what the team should do next.
+            This page turns live requirement activity into a drill-down layer for feature risk, schedule pressure, and the next intervention for each requirement.
           </p>
           <div className="risk-lookup-card">
             <p className="eyebrow" style={{ margin: 0 }}>Requirement Lookup</p>
@@ -1286,7 +1542,7 @@ function RiskPage() {
           )}
         </PanelCard>
 
-        <PanelCard title="Selected Requirement" subtitle={selectedRisk ? `${selectedRisk.requirement_id} risk detail` : "Choose a requirement to inspect"} className={`reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+        <PanelCard title="Selected Requirement" subtitle={selectedRisk ? `${selectedRisk.requirement_id} requirement drill-down` : "Choose a requirement to inspect"} className={`reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
           {selectedRisk ? (
             <div className="risk-detail-stack">
               <div className="prediction-metric amber">
@@ -1343,6 +1599,468 @@ function RiskPage() {
             rows={riskTableRows}
             emptyMessage={loading ? "Loading risk snapshot..." : "No risk snapshot available yet."}
           />
+        </PanelCard>
+      </section>
+    </div>
+  );
+}
+
+function AssignmentsPage() {
+  const heroReveal = useRevealOnView();
+  const gridReveal = useRevealOnView();
+  const [requirements, setRequirements] = useState([]);
+  const [developers, setDevelopers] = useState([]);
+  const [selectedRequirement, setSelectedRequirement] = useState(null);
+  const [issueInput, setIssueInput] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [formLoading, setFormLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [developerForm, setDeveloperForm] = useState({
+    developer_id: "",
+    name: "",
+    email: "",
+    role: "",
+    experience_years: "",
+    age: "",
+    tech_stack: "",
+    summary: "",
+    current_capacity: "3",
+  });
+
+  async function loadAssignmentsData() {
+    setLoading(true);
+    setError("");
+    try {
+      const [requirementsResponse, developersResponse] = await Promise.all([
+        fetch(`${ASSIGNMENT_API_BASE_URL}/api/assignment/requirements?limit=12`),
+        fetch(`${ASSIGNMENT_API_BASE_URL}/api/developers?limit=25`),
+      ]);
+
+      if (!requirementsResponse.ok) {
+        throw new Error(`Assignment engine request failed with ${requirementsResponse.status}`);
+      }
+      if (!developersResponse.ok) {
+        throw new Error(`Developer directory request failed with ${developersResponse.status}`);
+      }
+
+      const requirementsPayload = await requirementsResponse.json();
+      const developersPayload = await developersResponse.json();
+
+      const requirementRows = Array.isArray(requirementsPayload.requirements) ? requirementsPayload.requirements : [];
+      const developerRows = Array.isArray(developersPayload.developers) ? developersPayload.developers : [];
+
+      setRequirements(requirementRows);
+      setDevelopers(developerRows);
+      setSelectedRequirement((current) => {
+        if (current?.requirement_id) {
+          return requirementRows.find((item) => item.requirement_id === current.requirement_id) || requirementRows[0] || null;
+        }
+        return requirementRows[0] ?? null;
+      });
+    } catch (fetchError) {
+      setError(fetchError.message || "Failed to load assignment recommendations");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadAssignments() {
+      await loadAssignmentsData();
+    }
+
+    loadAssignments();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function fetchSingleRequirementRecommendation(issueId) {
+    const normalized = issueId.trim().toUpperCase();
+    if (!normalized) return;
+
+    setLookupLoading(true);
+    setError("");
+    try {
+      const response = await fetch(`${ASSIGNMENT_API_BASE_URL}/api/assignment/requirement/${encodeURIComponent(normalized)}`);
+      if (!response.ok) throw new Error(`Assignment engine request failed with ${response.status}`);
+      const payload = await response.json();
+      setSelectedRequirement(payload);
+      setRequirements((current) => {
+        const remaining = current.filter((item) => item.requirement_id !== payload.requirement_id);
+        return [payload, ...remaining];
+      });
+      setIssueInput(normalized);
+    } catch (fetchError) {
+      setError(fetchError.message || "Failed to load selected requirement recommendations");
+    } finally {
+      setLookupLoading(false);
+    }
+  }
+
+  async function handleDeveloperSubmit(event) {
+    event.preventDefault();
+    setFormLoading(true);
+    setError("");
+    try {
+      const response = await fetch(`${ASSIGNMENT_API_BASE_URL}/api/developers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          developer_id: developerForm.developer_id.trim(),
+          name: developerForm.name.trim(),
+          email: developerForm.email.trim() || null,
+          role: developerForm.role.trim() || null,
+          experience_years: Number(developerForm.experience_years || 0),
+          age: developerForm.age ? Number(developerForm.age) : null,
+          tech_stack: developerForm.tech_stack
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+          summary: developerForm.summary.trim() || null,
+          current_capacity: Number(developerForm.current_capacity || 3),
+        }),
+      });
+      if (!response.ok) throw new Error(`Developer save failed with ${response.status}`);
+
+      setDeveloperForm({
+        developer_id: "",
+        name: "",
+        email: "",
+        role: "",
+        experience_years: "",
+        age: "",
+        tech_stack: "",
+        summary: "",
+        current_capacity: "3",
+      });
+      await loadAssignmentsData();
+    } catch (submitError) {
+      setError(submitError.message || "Failed to save developer");
+    } finally {
+      setFormLoading(false);
+    }
+  }
+
+  async function handleDeleteDeveloper(developerId) {
+    if (!developerId) return;
+    setFormLoading(true);
+    setError("");
+    try {
+      const response = await fetch(`${ASSIGNMENT_API_BASE_URL}/api/developers/${encodeURIComponent(developerId)}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) throw new Error(`Developer delete failed with ${response.status}`);
+      await loadAssignmentsData();
+    } catch (deleteError) {
+      setError(deleteError.message || "Failed to delete developer");
+    } finally {
+      setFormLoading(false);
+    }
+  }
+
+  const totalRequirements = requirements.length;
+  const recommendedCoverage = requirements.filter((item) => Array.isArray(item.recommendations) && item.recommendations.length).length;
+  const topMatch = requirements.reduce((best, item) => {
+    const value = Number(item.top_score || item.recommendations?.[0]?.score || 0);
+    return value > best ? value : best;
+  }, 0);
+
+  return (
+    <div className="page dashboard-page assignment-page">
+      <section ref={heroReveal.ref} className={`dashboard-hero dashboard-stage reveal-block ${heroReveal.isVisible ? "is-visible" : ""}`}>
+        <div className="parallax-orb orb-c" />
+        <div>
+          <p className="eyebrow">Task Assignment / Recommendation</p>
+          <h1>See who should be assigned to each requirement next.</h1>
+          <p className="hero-text narrow">
+            This page ranks developers against live Jira requirements using skill overlap, repository familiarity, experience fit, and current availability.
+          </p>
+          <div className="risk-lookup-card">
+            <p className="eyebrow" style={{ margin: 0 }}>Requirement Lookup</p>
+            <div className="risk-lookup-row">
+              <input
+                className="risk-lookup-input"
+                placeholder="Enter issue ID, for example KAN-19"
+                value={issueInput}
+                onChange={(event) => setIssueInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") fetchSingleRequirementRecommendation(issueInput);
+                }}
+              />
+              <button
+                type="button"
+                className="button primary"
+                onClick={() => fetchSingleRequirementRecommendation(issueInput)}
+                disabled={lookupLoading}
+              >
+                {lookupLoading ? "Loading..." : "Load Requirement"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="glass-card dashboard-float reveal-card is-visible" style={{ padding: "22px", display: "grid", gap: "14px" }}>
+          <p className="eyebrow" style={{ margin: 0 }}>Assignment portfolio</p>
+          <div className="prediction-summary">
+            <article className="prediction-summary-card">
+              <strong>{loading ? "..." : totalRequirements}</strong>
+              <p>Requirements currently visible in the recommendation engine</p>
+            </article>
+            <article className="prediction-summary-card">
+              <strong>{loading ? "..." : developers.length}</strong>
+              <p>Developers available in the new talent directory</p>
+            </article>
+            <article className="prediction-summary-card">
+              <strong>{loading ? "..." : `${Math.round(topMatch * 100)}%`}</strong>
+              <p>Strongest current match confidence across the portfolio</p>
+            </article>
+            <article className="prediction-summary-card">
+              <strong>{loading ? "..." : recommendedCoverage}</strong>
+              <p>Requirements with at least one ranked recommendation</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      {error ? (
+        <StateCard
+          title="Assignment engine not reachable"
+          text={`${error}. Make sure the Developer Assignment Engine is running at ${ASSIGNMENT_API_BASE_URL}.`}
+          error
+          className="reveal-card is-visible"
+        />
+      ) : null}
+
+      <section ref={gridReveal.ref} className={`dashboard-grid intelligence-grid reveal-block ${gridReveal.isVisible ? "is-visible" : ""}`}>
+        <PanelCard title="Requirement Queue" subtitle="Requirements ranked by strongest available developer match" className={`span-2 reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          {loading ? (
+            <p className="empty-state">Loading assignment recommendations...</p>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>Requirement</th>
+                    <th>Status</th>
+                    <th>Priority</th>
+                    <th>Top Match</th>
+                    <th>Suggested Developer</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {requirements.length ? requirements.map((item) => {
+                    const topRecommendation = item.recommendations?.[0];
+                    return (
+                      <tr
+                        key={item.requirement_id}
+                        className={selectedRequirement?.requirement_id === item.requirement_id ? "risk-table-row active" : "risk-table-row"}
+                        onClick={() => setSelectedRequirement(item)}
+                      >
+                        <td>{item.requirement_id}</td>
+                        <td>{item.title || "Untitled requirement"}</td>
+                        <td>{item.status || "Unknown"}</td>
+                        <td>{item.priority || "Not set"}</td>
+                        <td>{topRecommendation ? `${Math.round(Number(topRecommendation.score || 0) * 100)}%` : "No match yet"}</td>
+                        <td>{topRecommendation?.developer_name || "No recommendation yet"}</td>
+                      </tr>
+                    );
+                  }) : (
+                    <tr>
+                      <td colSpan="6">No recommendation rows available yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </PanelCard>
+
+        <PanelCard title="Selected Requirement" subtitle={selectedRequirement ? `${selectedRequirement.requirement_id} recommendation detail` : "Choose a requirement to inspect"} className={`reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          {selectedRequirement ? (
+            <div className="risk-detail-stack">
+              <div className="prediction-metric cyan">
+                <span>Top Match</span>
+                <strong>{selectedRequirement.recommendations?.[0] ? `${Math.round(Number(selectedRequirement.recommendations[0].score || 0) * 100)}%` : "N/A"}</strong>
+                <p>{selectedRequirement.recommendations?.[0]?.developer_name || "No ranked developer yet for this requirement."}</p>
+              </div>
+              <div className="prediction-summary-card">
+                <strong>Status</strong>
+                <p>{selectedRequirement.status || "Unknown"}</p>
+              </div>
+              <div className="prediction-summary-card">
+                <strong>Due Date</strong>
+                <p>{selectedRequirement.due_date ? formatDate(selectedRequirement.due_date) : "No due date in Jira yet."}</p>
+              </div>
+            </div>
+          ) : (
+            <p className="empty-state">Select a requirement from the table to inspect recommendations.</p>
+          )}
+        </PanelCard>
+
+        <PanelCard title="Recommended Developers" subtitle="Top ranked developers for the selected requirement" className={`span-2 reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          {selectedRequirement?.recommendations?.length ? (
+            <div className="assignment-recommendation-grid">
+              {selectedRequirement.recommendations.slice(0, 4).map((recommendation) => (
+                <article key={`${selectedRequirement.requirement_id}-${recommendation.developer_id}`} className="assignment-card">
+                  <div className="assignment-card-top">
+                    <div>
+                      <strong>{recommendation.developer_name || recommendation.developer_id}</strong>
+                      <p>{recommendation.role || "Developer"} • {recommendation.experience_years ?? 0} yrs</p>
+                    </div>
+                    <span className="priority-badge high">{Math.round(Number(recommendation.score || 0) * 100)}%</span>
+                  </div>
+                  <div className="assignment-chip-row">
+                    {normalizeTechStack(recommendation.tech_stack).slice(0, 4).map((item) => (
+                      <span key={`${recommendation.developer_id}-${item}`} className="assignment-chip">{item}</span>
+                    ))}
+                  </div>
+                  <SimpleList items={recommendation.reasons || []} />
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="empty-state">No developer recommendations available for the selected requirement yet.</p>
+          )}
+        </PanelCard>
+
+        <PanelCard title="Developer Directory" subtitle="Profiles currently available to the assignment engine" className={`reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          {developers.length ? (
+            <div className="assignment-directory">
+              {developers.slice(0, 6).map((developer) => (
+                <div key={developer.developer_id} className="assignment-directory-row">
+                  <div className="assignment-directory-row-top">
+                    <div>
+                      <strong>{developer.name || developer.developer_id}</strong>
+                      <p>{developer.role || "Developer"} • {developer.experience_years ?? 0} yrs</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="button secondary assignment-delete-button"
+                      onClick={() => handleDeleteDeveloper(developer.developer_id)}
+                      disabled={formLoading}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                  <small>{normalizeTechStack(developer.tech_stack).slice(0, 3).join(", ") || "No tech stack added yet"}</small>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="empty-state">No developers found yet. Seed the new `developers` table to unlock recommendations.</p>
+          )}
+        </PanelCard>
+
+        <PanelCard title="Why These Matches Rank High" subtitle="Transparent scoring used by the recommendation engine" className={`span-2 reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          {selectedRequirement?.recommendations?.[0] ? (
+            <ContributionBreakdown
+              items={[
+                { label: "Skill Match", value: Math.round(Number(selectedRequirement.recommendations[0].skill_match || 0) * 100), tone: "cyan" },
+                { label: "Familiarity", value: Math.round(Number(selectedRequirement.recommendations[0].familiarity_match || 0) * 100), tone: "purple" },
+                { label: "Experience Fit", value: Math.round(Number(selectedRequirement.recommendations[0].experience_fit || 0) * 100), tone: "green" },
+                { label: "Availability", value: Math.round(Number(selectedRequirement.recommendations[0].availability_score || 0) * 100), tone: "amber" },
+              ]}
+            />
+          ) : (
+            <p className="empty-state">Select a requirement with recommendations to inspect the score breakdown.</p>
+          )}
+        </PanelCard>
+
+        <PanelCard title="Add Developer" subtitle="Create or update developer profiles directly from the dashboard" className={`span-2 reveal-card parallax-card ${gridReveal.isVisible ? "is-visible" : ""}`}>
+          <form className="assignment-form-grid" onSubmit={handleDeveloperSubmit}>
+            <label className="assignment-field">
+              <span>Developer ID</span>
+              <input
+                value={developerForm.developer_id}
+                onChange={(event) => setDeveloperForm((current) => ({ ...current, developer_id: event.target.value }))}
+                placeholder="arjun-dev"
+                required
+              />
+            </label>
+            <label className="assignment-field">
+              <span>Name</span>
+              <input
+                value={developerForm.name}
+                onChange={(event) => setDeveloperForm((current) => ({ ...current, name: event.target.value }))}
+                placeholder="Arjun"
+                required
+              />
+            </label>
+            <label className="assignment-field">
+              <span>Email</span>
+              <input
+                value={developerForm.email}
+                onChange={(event) => setDeveloperForm((current) => ({ ...current, email: event.target.value }))}
+                placeholder="arjun@example.com"
+              />
+            </label>
+            <label className="assignment-field">
+              <span>Role</span>
+              <input
+                value={developerForm.role}
+                onChange={(event) => setDeveloperForm((current) => ({ ...current, role: event.target.value }))}
+                placeholder="Backend Engineer"
+              />
+            </label>
+            <label className="assignment-field">
+              <span>Experience (years)</span>
+              <input
+                type="number"
+                step="0.5"
+                min="0"
+                value={developerForm.experience_years}
+                onChange={(event) => setDeveloperForm((current) => ({ ...current, experience_years: event.target.value }))}
+                placeholder="3.5"
+              />
+            </label>
+            <label className="assignment-field">
+              <span>Age</span>
+              <input
+                type="number"
+                min="0"
+                value={developerForm.age}
+                onChange={(event) => setDeveloperForm((current) => ({ ...current, age: event.target.value }))}
+                placeholder="24"
+              />
+            </label>
+            <label className="assignment-field">
+              <span>Current Capacity</span>
+              <input
+                type="number"
+                min="1"
+                value={developerForm.current_capacity}
+                onChange={(event) => setDeveloperForm((current) => ({ ...current, current_capacity: event.target.value }))}
+                placeholder="3"
+              />
+            </label>
+            <label className="assignment-field assignment-field-wide">
+              <span>Tech Stack</span>
+              <input
+                value={developerForm.tech_stack}
+                onChange={(event) => setDeveloperForm((current) => ({ ...current, tech_stack: event.target.value }))}
+                placeholder="FastAPI, React, Supabase, Python"
+              />
+            </label>
+            <label className="assignment-field assignment-field-wide">
+              <span>Summary</span>
+              <textarea
+                value={developerForm.summary}
+                onChange={(event) => setDeveloperForm((current) => ({ ...current, summary: event.target.value }))}
+                placeholder="Works mostly on API integrations and dashboard delivery."
+                rows={4}
+              />
+            </label>
+            <div className="assignment-form-actions">
+              <button type="submit" className="button primary" disabled={formLoading}>
+                {formLoading ? "Saving..." : "Save Developer"}
+              </button>
+            </div>
+          </form>
         </PanelCard>
       </section>
     </div>
@@ -1444,8 +2162,8 @@ function EstimationPage() {
       >
         <div className="parallax-orb orb-c" />
         <div>
-          <p className="eyebrow">Effort Estimation</p>
-          <h1>Predict effort before work begins.</h1>
+          <p className="eyebrow">Estimation Intelligence</p>
+          <h1>See whether your estimates are accurate and drifting.</h1>
           <p className="hero-text narrow">
             Enter a Jira issue ID to generate a hybrid heuristic and LLM-backed effort estimate,
             see drift signals, and track how the score has evolved over time.
@@ -1851,17 +2569,167 @@ function HeroLoader({ progress }) {
 function getRoute() {
   const value = ((window.location.hash || "#/").replace(/^#/, "").replace(/\/+$/, "") || "/");
   if (value === "/pricing") return "pricing";
+  if (value === "/alerts" || value === "/intelligence") return "alerts";
   if (value === "/risk") return "risk";
-  if (value === "/intelligence") return "intelligence";
-  if (value === "/manager") return "manager";
+  if (value === "/assignments") return "assignments";
+  if (value === "/team" || value === "/manager") return "team";
   if (value === "/developer") return "developer";
   if (value === "/estimation") return "estimation";
-  return "landing";
+  if (value === "/" || value === "/overview") return "overview";
+  return "overview";
+}
+
+function getDefaultRouteForRole(role) {
+  return role === "developer" ? "developer" : "overview";
+}
+
+function getAllowedRoutes(role) {
+  return ROLE_ROUTE_MAP[role] || [];
+}
+
+function isRouteAllowedForRole(route, role) {
+  return getAllowedRoutes(role).includes(route);
+}
+
+function getSafeRouteForRole(route, role) {
+  return isRouteAllowedForRole(route, role) ? route : getDefaultRouteForRole(role);
+}
+
+function routeToHash(route) {
+  return route === "overview" ? "#/" : `#/${route}`;
 }
 
 function formatDate(value) {
   if (!value) return "N/A";
   return new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+}
+
+function formatRoleLabel(role) {
+  return role === "manager" ? "Manager" : role === "developer" ? "Developer" : "Unknown";
+}
+
+function base64UrlEncode(value) {
+  return window
+    .btoa(unescape(encodeURIComponent(value)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function base64UrlDecode(value) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4 || 4)) % 4);
+  return decodeURIComponent(escape(window.atob(padded)));
+}
+
+function decodeJwtPayload(token) {
+  try {
+    const parts = String(token || "").split(".");
+    if (parts.length !== 3) return null;
+    return JSON.parse(base64UrlDecode(parts[1]));
+  } catch {
+    return null;
+  }
+}
+
+function createJwtSession(account) {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const payload = {
+    sub: account.email,
+    name: account.name,
+    role: account.role,
+    iat: nowSeconds,
+    exp: nowSeconds + (8 * 60 * 60),
+  };
+  const header = { alg: "none", typ: "JWT" };
+  const token = `${base64UrlEncode(JSON.stringify(header))}.${base64UrlEncode(JSON.stringify(payload))}.frontend`;
+  return {
+    token,
+    ...payload,
+  };
+}
+
+function readStoredSession() {
+  if (typeof window === "undefined") return null;
+  const token = window.localStorage.getItem(AUTH_STORAGE_KEY);
+  if (!token) return null;
+
+  const payload = decodeJwtPayload(token);
+  if (!payload?.role || !payload?.exp || payload.exp <= Math.floor(Date.now() / 1000)) {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    return null;
+  }
+
+  return {
+    token,
+    ...payload,
+  };
+}
+
+function normalizeTechStack(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === "string" ? item.trim() : item?.name || item?.label || ""))
+      .filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function buildExecutiveHighRiskRequirements(issues, events) {
+  const commitMap = new Map(
+    events.map((event) => [String(event.commit_id || "").trim(), event]),
+  );
+
+  const rows = issues
+    .map((issue) => {
+      const commitIds = Array.isArray(issue.commits) ? issue.commits.map((value) => String(value).trim()).filter(Boolean) : [];
+      const linkedEvents = commitIds.map((commitId) => commitMap.get(commitId)).filter(Boolean);
+      const totalChanges = linkedEvents.reduce((sum, event) => sum + Number(event.total_changes || 0), 0);
+      const priority = String(issue.priority || "").toLowerCase();
+      const status = String(issue.status || "").toLowerCase();
+      const riskScore = clamp(
+        (commitIds.length ? 20 : 56)
+        + (priority.includes("high") || priority.includes("critical") ? 18 : 8)
+        + (status.includes("progress") || status.includes("review") ? 10 : 18)
+        - Math.min(totalChanges / 18, 24),
+        8,
+        96,
+      );
+      return {
+        issue_id: issue.issue_id,
+        title: issue.title || "Untitled requirement",
+        risk: `${Math.round(riskScore)}%`,
+        status: issue.status || "Unknown",
+        signal: commitIds.length ? `${commitIds.length} linked commits` : "No linked commits yet",
+        rawRisk: riskScore,
+      };
+    })
+    .sort((a, b) => b.rawRisk - a.rawRisk)
+    .slice(0, 5)
+    .map(({ rawRisk, ...rest }) => rest);
+
+  return rows;
+}
+
+function buildExecutiveAlerts(issues, events, syncInfo) {
+  const linkedRequirements = issues.filter((issue) => Array.isArray(issue.commits) && issue.commits.length > 0).length;
+  const unlinkedRequirements = Math.max(issues.length - linkedRequirements, 0);
+  const activeDevelopers = new Set(events.map((event) => event.author).filter(Boolean)).size;
+  const alerts = [
+    `${unlinkedRequirements} requirements still have no linked commit evidence.`,
+    `${activeDevelopers || 0} active developers are carrying the current delivery load.`,
+    `${syncInfo?.linked_commits || 0} commits were linked in the latest sync cycle.`,
+  ];
+  if (events.length > 20) {
+    alerts.push("Commit volume is high enough that workload balancing should be reviewed today.");
+  }
+  return alerts.slice(0, 4);
 }
 
 function groupCounts(rows, key) {
